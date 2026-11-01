@@ -1,0 +1,7 @@
+/build/
+/results/
+/docs/
+/.Xil/
+/vivado*.log
+/vivado*.jou
+__pycache__/
