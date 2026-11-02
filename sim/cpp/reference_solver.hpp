@@ -2,9 +2,9 @@
 #include <array>
 #include <bit>
 #include <cstdint>
-#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 // Independent CPU oracle. Sequential propagation, rather than RTL's parallel
 // step semantics. Every recursive call owns its board (no undo bookkeeping).
@@ -23,16 +23,17 @@ inline constexpr auto units = [] {
 }();
 
 inline Board parse(const std::string& line) {
+    std::string_view text(line);
+    if (text.ends_with('\r')) text.remove_suffix(1); // getline on CRLF input
+    if (text.size() != 81)
+        throw std::runtime_error("Expected exactly 81 characters ('.' or '1'..'9')");
     Board board{};
-    std::istringstream input(line);
-    std::string token;
-    for (auto& m : board) {
-        if (!(input >> token) || !(token == "-" ||
-            (token.size() == 1 && token[0] >= '1' && token[0] <= '9')))
-            throw std::runtime_error("Expected 81 whitespace-separated digits or '-'");
-        m = token == "-" ? all : Mask(1u << (token[0]-'1'));
+    for (unsigned i = 0; i < board.size(); ++i) {
+        const char digit = text[i];
+        if (digit == '.') board[i] = all;
+        else if (digit >= '1' && digit <= '9') board[i] = Mask(1u << (digit-'1'));
+        else throw std::runtime_error("Invalid cell: expected '.' or '1'..'9'");
     }
-    if (input >> token) throw std::runtime_error("Extra puzzle token");
     return board;
 }
 

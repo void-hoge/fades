@@ -8,6 +8,25 @@ static void require(bool condition, const char* message) {
 }
 int main(int argc, char** argv) {
     try {
+        std::string text(81, '.');
+        text[0] = '1'; text[8] = '9'; text[9] = '2'; text[80] = '4';
+        auto parsed = reference::parse(text);
+        require(parsed[0] == 1 && parsed[8] == 256 && parsed[9] == 2 && parsed[80] == 8,
+                "Text cell order or digit mask");
+        require(parsed[1] == reference::all, "Dot must mean all candidates");
+        require(reference::parse(text+"\r") == parsed, "CRLF input");
+        for (const auto& bad : {std::string(80, '.'), std::string(82, '.'), text+" "}) {
+            bool rejected = false;
+            try { (void)reference::parse(bad); } catch (const std::runtime_error&) { rejected = true; }
+            require(rejected, "Invalid text length accepted");
+        }
+        for (char ch : {'0', '-', ' ', 'x', '\t', '\r'}) {
+            auto bad = text; bad[40] = ch;
+            bool rejected = false;
+            try { (void)reference::parse(bad); } catch (const std::runtime_error&) { rejected = true; }
+            require(rejected, "Invalid text cell accepted");
+        }
+        std::cout << "PASS: 81-character format, row-major masks, LF/CRLF and rejection paths\n";
         reference::Board empty;
         empty.fill(reference::all);
         auto multiple = reference::solve(empty, 2);

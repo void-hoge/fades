@@ -1,14 +1,13 @@
-# Out-of-context implementation of one core or its single-core KV260 wrapper.
+# Out-of-context implementation of one solver core.
 # Arguments: clock period in ns (default 10), output directory,
-# optional checkpoint (empty string for fresh synthesis), top module (core/top).
+# optional checkpoint (empty string for fresh synthesis).
 set period [expr {$argc > 0 ? [lindex $argv 0] : 10.0}]
 set scripts [file dirname [file normalize [info script]]]
 set root [file normalize $scripts/../..]
 set out [file normalize [expr {$argc > 1 ? [lindex $argv 1] : "build/vivado_single_core"}]]
 set checkpoint ""
 if {$argc > 2 && [lindex $argv 2] ne ""} { set checkpoint [file normalize [lindex $argv 2]] }
-set top [expr {$argc > 3 ? [lindex $argv 3] : "core"}]
-if {$top ni {core top}} { error "Top module must be core or top" }
+set top core
 file mkdir $out
 # Keep Vivado's auxiliary placement/congestion files alongside its reports.
 cd $out
@@ -17,7 +16,7 @@ if {$checkpoint ne ""} {
     open_checkpoint $checkpoint
 } else {
     create_project -in_memory -part xck26-sfvc784-2LV-c
-    read_verilog -sv [list $root/rtl/inference.sv $root/rtl/branch.sv $root/rtl/core.sv $root/fpga/kv260/top.sv]
+    read_verilog -sv [list $root/rtl/inference.sv $root/rtl/branch.sv $root/rtl/core.sv]
     set f [open $root/fpga/constraints/core_ooc.xdc r]
     set constraints [read $f]
     close $f

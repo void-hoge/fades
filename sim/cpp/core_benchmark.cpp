@@ -68,15 +68,9 @@ static std::vector<Problem> load_dataset(const char* path, unsigned limit) {
         if (line.find_first_not_of(" \r\t") == std::string::npos) continue;
         Problem p;
         p.name = "dataset_" + std::to_string(problems.size()+1);
-        std::istringstream tokens(line);
-        std::string token;
-        for (unsigned i = 0; i < 81; ++i) {
-            require(bool(tokens >> token), "Short puzzle");
-            require(token == "-" || (token.size() == 1 && token[0] >= '1' && token[0] <= '9'),
-                    "Invalid puzzle token");
-            set_mask(p.input, i, token == "-" ? 511 : 1u << (token[0]-'1'));
-        }
-        auto solution = reference::solve(reference::parse(line));
+        const auto board = reference::parse(line);
+        for (unsigned i = 0; i < 81; ++i) set_mask(p.input, i, board[i]);
+        auto solution = reference::solve(board);
         require(solution.solutions == 1, "Reference failed");
         for (unsigned i = 0; i < 81; ++i)
             set_mask(p.answer, i, solution.first[i]);
