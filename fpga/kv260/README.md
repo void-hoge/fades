@@ -42,14 +42,15 @@ Verilog互換構文だけの`fades_kv260.sv`に限り、生成時の`FILE_TYPE`�
 Vivado 配下の XilinxBoardStore を参照するため、Vivado の環境を設定しておく。
 
 ```sh
-cmake --preset fpga-kv260 -DFADES_CORES=6 -DFADES_VIVADO_JOBS=2
-cmake --build --preset fpga-kv260 --target kv260-package
+cmake --preset kv260-pl -DFADES_CORES=6 -DFADES_VIVADO_JOBS=2
+cmake --build --preset kv260-pl
 ```
 
 `FADES_CORES` は既定6、対応範囲は1〜6。ボードトップ→AXI制御→コア群へ伝播する。
 単一コアもこの実装経路を使う。ABIは6コア分のカウンター領域を保持し、未実装分は0。
 
-既定出力は `build/fpga-kv260/fpga/kv260/`。configure時の `-B` で変更できる。
+通常のbuildで回路生成・検査・firmwareパッケージまで実行する。
+既定出力は `build/kv260-pl/fpga/kv260/`。configure時の `-B` で変更できる。
 `VIVADO_EXECUTABLE` と `DTC_EXECUTABLE` でツールのパスを明示指定できる。
 `FADES_VIVADO_JOBS` はVivado内部の並列数で、CMakeの `--parallel` とは独立。
 
@@ -67,7 +68,7 @@ cmake --build --preset fpga-kv260 --target kv260-package
 主要な生成物:
 
 ```text
-build/fpga-kv260/fpga/kv260/
+build/kv260-pl/fpga/kv260/
   firmware/fades/       fades.bit.bin, fades.dtbo, shell.json
   implementation/
     timing_summary.rpt   setup / hold / pulse-width と未制約経路
@@ -82,45 +83,49 @@ build/fpga-kv260/fpga/kv260/
 
 ## ソースと firmware を実機へ転送
 
-SSHエイリアス `kria` でrootに接続する。実機作業ディレクトリは `/root/fades/cmake/` とする。
-初回は `/root/fades` を用意し、既存の内容を確認してから転送する。
+リポジトリのソースと `build/kv260-pl/fpga/kv260/firmware/fades/` の内容を、
+ユーザーが任意の方法で実機へコピーする。ソースはGitで取得してもよい。
+接続方法・転送先はユーザーが選び、ビルドシステムにはSSH接続・自動転送を含めない。
+
+実機のUbuntuで必要なパッケージを入れる（初回）:
 
 ```sh
-ssh kria 'ls /root/fades'
-ssh kria 'mkdir -p /root/fades/cmake/sim /root/fades/cmake/firmware'
-scp CMakeLists.txt CMakePresets.json kria:/root/fades/cmake/
-scp -r host reference kria:/root/fades/cmake/
-scp -r sim/data kria:/root/fades/cmake/sim/
-scp build/fpga-kv260/fpga/kv260/firmware/fades/* kria:/root/fades/cmake/firmware/
-ssh kria 'cmake --preset host-kv260 -S /root/fades/cmake'
-ssh kria 'cmake --build /root/fades/cmake/build/host-kv260 --parallel 4'
-ssh kria 'cmake --build /root/fades/cmake/build/host-kv260 --target host-module'
-ssh kria 'ctest --test-dir /root/fades/cmake/build/host-kv260 --output-on-failure'
+sudo apt install build-essential cmake ninja-build python3 "linux-headers-$(uname -r)"
 ```
 
-モジュールは実行中カーネルに対応したヘッダーでビルドする。
-実機には `build-essential cmake ninja-build python3` と対応するカーネルヘッダーが必要。
+実機側のリポジトリルートで実行する:
+
+```sh
+cmake --preset kv260-ps
+cmake --build --preset kv260-ps
+ctest --preset kv260-ps
+```
+
+通常のbuildでC++ツールと `build/kv260-ps/host/driver/fades.ko` を生成する。
+モジュールは実行中カーネルに対応したヘッダーでビルドする。Vivado・RTL検証ツールは不要。
 ヘッダーの場所や出力先の指定は [PS ソフトウェア](../../host/README.md) を参照。
 
 ## ロードと試験
 
-実機の root シェルで、使用中のプログラムと mmap を閉じてから実行する。
+実機のrootシェルで、リポジトリルートから実行する。
+使用中のプログラムとmmapを閉じ、`FIRMWARE_DIR` は実際にコピーしたfirmwareのディレクトリへ変更する。
 
 ```sh
+FIRMWARE_DIR=/path/to/copied/firmware/fades
 mkdir -p /lib/firmware/xilinx/fades
-cp /root/fades/cmake/firmware/* /lib/firmware/xilinx/fades/
+cp "$FIRMWARE_DIR"/* /lib/firmware/xilinx/fades/
 if test -d /sys/module/fades; then rmmod fades; fi
 xmutil unloadapp
 xmutil loadapp fades
 xmutil listapps
-insmod /root/fades/cmake/build/host-kv260/host/driver/fades.ko
+insmod build/kv260-ps/host/driver/fades.ko
 ls -l /dev/fades
-python3 /root/fades/cmake/host/tests/check_abi.py
-/root/fades/cmake/build/host-kv260/host/fades_verify /root/fades/cmake/sim/data/17puz49158.txt 1 1 1
-/root/fades/cmake/build/host-kv260/host/fades_verify /root/fades/cmake/sim/data/17puz49158.txt 1024 3 1 mixed
-/root/fades/cmake/build/host-kv260/host/fades_verify /root/fades/cmake/sim/data/17puz49158.txt 8193 6 1
-/root/fades/cmake/build/host-kv260/host/fades_verify /root/fades/cmake/sim/data/HardestDatabase110626.txt 375 1 1
-/root/fades/cmake/build/host-kv260/host/fades_benchmark /root/fades/cmake/sim/data/17puz49158.txt 10
+python3 host/tests/check_abi.py
+build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 1 1 1
+build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 1024 3 1 mixed
+build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 8193 6 1
+build/kv260-ps/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
+build/kv260-ps/host/fades_benchmark sim/data/17puz49158.txt 10
 ```
 
 `xmutil` の終了値に加え、listapps、デバイスの存在、機能試験でロードを確認する。

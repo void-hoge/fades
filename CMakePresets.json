@@ -11,36 +11,34 @@
         "CMAKE_BUILD_TYPE": "Release",
         "BUILD_TESTING": "OFF",
         "FADES_BUILD_HOST": "OFF",
+        "FADES_BUILD_DRIVER": "OFF",
         "FADES_BUILD_SIM": "OFF",
         "FADES_BUILD_FPGA": "OFF"
       }
     },
     {
-      "name": "host-native", "inherits": "base",
-      "cacheVariables": { "FADES_BUILD_HOST": "ON", "BUILD_TESTING": "ON" }
+      "name": "host", "inherits": "base",
+      "displayName": "Development tools and RTL simulation",
+      "cacheVariables": { "FADES_BUILD_HOST": "ON", "FADES_BUILD_SIM": "ON", "BUILD_TESTING": "ON" }
     },
     {
-      "name": "host-kv260", "inherits": "base",
-      "cacheVariables": { "FADES_BUILD_HOST": "ON", "BUILD_TESTING": "ON" }
+      "name": "kv260-ps", "inherits": "base",
+      "displayName": "KV260 userspace tools and kernel module (native build)",
+      "cacheVariables": { "FADES_BUILD_HOST": "ON", "FADES_BUILD_DRIVER": "ON", "BUILD_TESTING": "ON" }
     },
     {
-      "name": "sim", "inherits": "base",
-      "cacheVariables": { "FADES_BUILD_SIM": "ON", "BUILD_TESTING": "ON" }
-    },
-    {
-      "name": "fpga-kv260", "inherits": "base",
+      "name": "kv260-pl", "inherits": "base",
+      "displayName": "KV260 FPGA implementation and firmware",
       "cacheVariables": { "FADES_BUILD_FPGA": "ON" }
     }
   ],
   "buildPresets": [
-    { "name": "host-native", "configurePreset": "host-native" },
-    { "name": "host-kv260", "configurePreset": "host-kv260" },
-    { "name": "sim", "configurePreset": "sim" },
-    { "name": "fpga-kv260", "configurePreset": "fpga-kv260" }
+    { "name": "host", "configurePreset": "host" },
+    { "name": "kv260-pl", "configurePreset": "kv260-pl" },
+    { "name": "kv260-ps", "configurePreset": "kv260-ps" }
   ],
   "testPresets": [
-    { "name": "host-native", "configurePreset": "host-native", "output": { "outputOnFailure": true } },
-    { "name": "host-kv260", "configurePreset": "host-kv260", "output": { "outputOnFailure": true } },
-    { "name": "sim", "configurePreset": "sim", "output": { "outputOnFailure": true } }
+    { "name": "host", "configurePreset": "host", "output": { "outputOnFailure": true } },
+    { "name": "kv260-ps", "configurePreset": "kv260-ps", "output": { "outputOnFailure": true } }
   ]
 }

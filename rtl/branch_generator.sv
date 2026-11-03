@@ -30,7 +30,7 @@ module branch_generator (
     end
         // Keep eligibility outside the selector. This boundary and factoring
         // preserve the smaller mapping measured with the original pair policy.
-        begin : pair_policy
+        if (1) begin : pair_policy
             wire [80:0] unresolved, pair;
             for (s = 0; s < 81; s = s + 1) begin : eligibility
                 wire [8:0] mask = candidates[9*s +: 9];

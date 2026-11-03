@@ -5,22 +5,35 @@ foreach(tool IN ITEMS fades_verify fades_benchmark)
     target_compile_options(${tool} PRIVATE -Wall -Wextra -Werror)
 endforeach()
 
-set(FADES_KERNEL_BUILD "" CACHE PATH "Kernel build directory (empty uses the running kernel)")
-find_program(KBUILD_MAKE_EXECUTABLE NAMES make REQUIRED)
-set(module_dir "${CMAKE_CURRENT_BINARY_DIR}/driver")
-set(kbuild_args)
-if(FADES_KERNEL_BUILD)
-    list(APPEND kbuild_args "KDIR=${FADES_KERNEL_BUILD}")
+if(FADES_BUILD_DRIVER)
+    set(FADES_KERNEL_BUILD "" CACHE PATH "Kernel build directory (empty uses the running kernel)")
+    if(FADES_KERNEL_BUILD)
+        set(kernel_build "${FADES_KERNEL_BUILD}")
+    else()
+        execute_process(COMMAND uname -r OUTPUT_VARIABLE kernel_release
+            OUTPUT_STRIP_TRAILING_WHITESPACE COMMAND_ERROR_IS_FATAL ANY)
+        set(kernel_build "/lib/modules/${kernel_release}/build")
+    endif()
+    if(NOT EXISTS "${kernel_build}/Makefile")
+        message(FATAL_ERROR "Kernel headers not found at ${kernel_build}. Install headers for the running kernel or set FADES_KERNEL_BUILD.")
+    endif()
+    find_program(KBUILD_MAKE_EXECUTABLE NAMES make REQUIRED)
+    set(module_dir "${CMAKE_CURRENT_BINARY_DIR}/driver")
+    file(MAKE_DIRECTORY "${module_dir}")
+    # Copy only when contents change so Kbuild can keep unchanged objects.
+    configure_file(driver/fades.c "${module_dir}/fades.c" COPYONLY)
+    configure_file(include/fades_ioctl.h "${module_dir}/fades_ioctl.h" COPYONLY)
+    configure_file(driver/Makefile "${module_dir}/Makefile" COPYONLY)
+    # Let Kbuild check its own header/config dependencies on every invocation.
+    add_custom_target(host-module ALL
+        COMMAND "${KBUILD_MAKE_EXECUTABLE}" -C "${kernel_build}" "M=${module_dir}" modules
+        BYPRODUCTS "${module_dir}/fades.ko"
+        USES_TERMINAL VERBATIM)
 endif()
-add_custom_target(host-module
-    COMMAND "${KBUILD_MAKE_EXECUTABLE}" -C "${CMAKE_CURRENT_SOURCE_DIR}/driver"
-        "OUT=${module_dir}" ${kbuild_args}
-    BYPRODUCTS "${module_dir}/fades.ko"
-    USES_TERMINAL VERBATIM)
 
 if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME host-input COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_input.py" "$<TARGET_FILE_DIR:fades_verify>")
-    set_tests_properties(host-input PROPERTIES LABELS quick TIMEOUT 60)
+    set_tests_properties(host-input PROPERTIES TIMEOUT 60)
 endif()
