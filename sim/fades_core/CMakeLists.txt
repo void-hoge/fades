@@ -6,6 +6,9 @@ verilate(core_test SOURCES ${FADES_CORE_RTL} TOP_MODULE fades_core
 add_test(NAME fades-core COMMAND core_test "${FADES_DATASET}"
     "${CMAKE_CURRENT_BINARY_DIR}/results.csv" 0)
 set_tests_properties(fades-core PROPERTIES LABELS fades_core TIMEOUT 1800)
+add_test(NAME fades-core-hard COMMAND core_test "${PROJECT_SOURCE_DIR}/sim/data/HardestDatabase110626.txt"
+    "${CMAKE_CURRENT_BINARY_DIR}/hard-results.csv" 0)
+set_tests_properties(fades-core-hard PROPERTIES LABELS fades_core TIMEOUT 1800)
 add_custom_target(core-summary COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/core_results.py"
     summary "${CMAKE_CURRENT_BINARY_DIR}/results.csv" "${CMAKE_CURRENT_BINARY_DIR}/summary.json"
     VERBATIM)

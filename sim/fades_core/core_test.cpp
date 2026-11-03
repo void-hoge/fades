@@ -3,6 +3,7 @@
 #include "Vfades_core.h"
 #include "verilated.h"
 #include "sudoku.hpp"
+#include "triad.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -17,7 +18,7 @@
 using State = VlWide<23>;
 // Match core's fixed depth. The prefill goes through its public
 // input interface and the assertions below verify the configured capacity.
-static constexpr unsigned deque_depth = 1024;
+static constexpr unsigned deque_depth = 512;
 static constexpr unsigned prefill = deque_depth / 2;
 static void require(bool value, const std::string& why) {
     if (!value) throw std::runtime_error(why);
@@ -77,7 +78,7 @@ static std::vector<Problem> load_dataset(const char* path, unsigned limit) {
         validate(p, p.answer);
         problems.push_back(p);
     }
-    require(problems.size() >= prefill, "Half-full test needs at least 512 puzzles");
+    require(problems.size() >= prefill, "Half-full test needs at least 256 puzzles");
     return problems;
 }
 struct Stats {
@@ -185,8 +186,8 @@ static Stats run(Vfades_core& dut, const std::vector<Problem>& problems,
                 require(s.branch > previous_branches && s.contradiction > previous_contradictions,
                         "Search-unsat case did not exercise exhaustive backtracking");
             if (problems[finished].name == "forced_conflict_metadata")
-                require(s.infer - previous_infer == 2 && s.branch == previous_branches,
-                        "Delayed deduction-conflict flag lost or misaligned");
+                require(s.branch == previous_branches,
+                         "Conflicting forces were not detected before branching");
             csv << name << ',' << problems[finished].name << ',' << (s.cycles-previous_finish)
                 << ',' << (s.infer-previous_infer) << ',' << (s.branch-previous_branches)
                 << ',' << (s.contradiction-previous_contradictions)
@@ -255,8 +256,32 @@ int main(int argc, char** argv) {
         set_mask(duplicate.input, 0, mask_at(duplicate.input, 1));
         Problem hall;
         hall.input = uniform(511); hall.solvable = false; hall.exact = false;
-        hall.name = "unsat_requires_search";
+        hall.name = "triad_cardinality_unsat";
         for (unsigned i = 0; i < 9; ++i) set_mask(hall.input, i, i < 3 ? 3 : 508);
+        // Find a genuinely search-unsatisfiable input for the stronger engine.
+        // Preserve all clues and add one wrong digit; reject cases already
+        // detected by triad closure, and independently prove unsatisfiability.
+        Problem search_unsat;
+        bool found = false;
+        for (unsigned p = 0; p < std::min(std::size_t(256), problems.size()) && !found; ++p) {
+            for (unsigned c = 0; c < 81 && !found; ++c) {
+                if (mask_at(problems[p].input, c) != 511) continue;
+                for (unsigned d = 0; d < 9 && !found; ++d) {
+                    if (mask_at(problems[p].answer, c) == (1u << d)) continue;
+                    reference::Board board;
+                    for (unsigned i = 0; i < 81; ++i) board[i] = mask_at(problems[p].input, i);
+                    board[c] = 1u << d;
+                    auto model = triad::initial(board);
+                    if (!triad::close(model) || reference::solve(board).solutions) continue;
+                    search_unsat = problems[p];
+                    search_unsat.name = "unsat_requires_search";
+                    search_unsat.solvable = false; search_unsat.exact = false;
+                    set_mask(search_unsat.input, c, 1u << d);
+                    found = true;
+                }
+            }
+        }
+        require(found, "Could not construct a triad search-unsatisfiable case");
         Problem forced;
         forced.input = uniform(511); forced.solvable = false; forced.exact = false;
         forced.name = "forced_conflict_metadata";
@@ -273,6 +298,7 @@ int main(int argc, char** argv) {
                 case 2: directed.push_back(duplicate); break;
                 case 3: directed.push_back(hall); break;
                 case 4: directed.push_back(forced); break;
+                case 5: directed.push_back(search_unsat); break;
                 default: directed.push_back(i%2 ? completed : problems[i%problems.size()]);
             }
         }
@@ -284,8 +310,8 @@ int main(int argc, char** argv) {
         for (unsigned i = 0; i < 1000 && dut.pending_branches < 2; ++i) tick(dut);
         require(dut.busy && dut.pending_branches >= 2, "Active-reset setup failed");
         auto stress = run(dut, directed, "stress", true, csv);
-        require(stress.input_stalls && stress.output && stress.disabled && stress.concurrent_push_enqueue,
-                "Missing ingress / output / enable stall or dual-write coverage");
+        require(stress.input_stalls && stress.output && stress.disabled && !stress.concurrent_push_enqueue,
+                 "Missing stall coverage or illegal simultaneous SDP writes");
         csv.flush();
         require(bool(csv), "Cannot write complete CSV");
         std::ofstream totals(std::string(argv[2]) + ".totals.json");

@@ -19,6 +19,7 @@ add_library(sudoku_reference INTERFACE)
 target_include_directories(sudoku_reference INTERFACE "${PROJECT_SOURCE_DIR}/reference")
 set(FADES_CORE_RTL
     "${PROJECT_SOURCE_DIR}/rtl/deduction_engine.sv"
+    "${PROJECT_SOURCE_DIR}/rtl/triad_engine.sv"
     "${PROJECT_SOURCE_DIR}/rtl/branch_generator.sv"
     "${PROJECT_SOURCE_DIR}/rtl/fades_core.sv")
 set(FADES_STREAM_RTL ${FADES_CORE_RTL}

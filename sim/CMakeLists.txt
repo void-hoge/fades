@@ -6,7 +6,7 @@ find_program(YOSYS_EXECUTABLE NAMES yosys REQUIRED)
 include("${PROJECT_SOURCE_DIR}/cmake/RtlTests.cmake")
 set(FADES_DATASET "${CMAKE_CURRENT_SOURCE_DIR}/data/17puz49158.txt" CACHE FILEPATH "Test dataset")
 set(FADES_BASELINE "" CACHE FILEPATH "Full core-test CSV baseline for regression")
-foreach(suite IN ITEMS deduction_engine branch_generator fades_core fades fades_axi async_queue reference)
+foreach(suite IN ITEMS deduction_engine branch_generator triad fades_core fades fades_axi async_queue reference)
     add_subdirectory(${suite})
 endforeach()
 

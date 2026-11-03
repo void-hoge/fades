@@ -1,9 +1,13 @@
 # FADES: FPGA-Accelerated Deductive and Explorative Sudoku Solver
 
-KV260 向けの SystemVerilog 数独ソルバー。Singles / Locked Candidates を並列適用し、停滞時は候補を二分して深さ優先探索する。
+KV260 向けの SystemVerilog 数独ソルバー。セル・triad・帯の配置候補の制約を
+並列に伝播し、停滞時は配置候補を均等二分して深さ優先探索する。
 PS の Linux プログラムから DDR / AXI DMA 経由で問題を投入し、ID 付きの結果を回収する。
 
-既定の実機構成は **6 コア × 100 MHz、DMA 200 MHz**。コア数は1〜6で指定できる。
+ビルドの既定構成は **6 コア × 100 MHz、DMA 200 MHz**。コア数は1〜6で指定できる。
+末尾の実機性能値は従来の Singles / Locked Candidates・セル分岐回路の測定値。
+triad 回路は性能評価中の試作。現シミュレーションでは従来回路より遅いため、
+ボードビルドは停止し、モデルで性能改善を確認してから実装を進める。
 最初の解を返し、解なしも結果を 1 件返す。問題の一意性を証明する処理ではない。
 
 ビルド・検証の基本操作は **configure → build → test**。
@@ -99,6 +103,7 @@ ctest --preset host                         # 全試験（ホスト入力試験�
 ctest --preset host -L '^fades_core$'        # コア単体：全問題集・ストレス・構造合成・lint
 ctest --preset host -L '^fades$'             # 指定コア数で供給・回収を含む統合試験・lint
 ctest --preset host -L '^deduction_engine$'  # 推論の有向試験・形式検証
+ctest --preset host -L '^triad$'             # triad推論・配置分岐のモデル照合・形式検証
 ctest --preset host -L '^async_queue$'       # 実装に使うXPM非同期FIFOの試験
 ```
 
@@ -173,13 +178,46 @@ ctest --test-dir build/host-1core --output-on-failure -L '^fades$'
 | Linux接続    | `host/include/fades_ioctl.h` → `host/driver/fades.c`                | 公開ABI → バッファ・DMA・制御               |
 | ボード生成   | `fpga/kv260/scripts/build.tcl`                                      | PS・DMA・クロックの接続、実装、出力検査     |
 | PLの入口     | `rtl/fades_axi.sv` → `fades.sv`                                     | 制御 → 供給・ID管理・結果回収・コア群       |
-| 探索         | `rtl/fades_core.sv` → `deduction_engine.sv` / `branch_generator.sv` | 状態列・探索 → 推論 / 分岐                  |
+| 探索         | `rtl/fades_core.sv` → `triad_engine.sv` | 状態列・探索 → triad推論 / 配置分岐                  |
 | クロック境界 | `rtl/async_queue.sv`                                                | XPM非同期FIFOと試験用モデル                 |
 | CPU照合      | `reference/sudoku.hpp`                                              | PSツールとRTL試験が共有する独立参照ソルバー |
 
 `build/` は生成物、`results/` は生ログ・実験履歴、`docs/` はローカル設計メモ。
 
+## Triad コア
+
+探索状態は次の1,539 bitで、セル候補だけでは表現できない配置間の制約も保存する。
+
+|ビット範囲|内容|
+|---|---|
+|`[728:0]`|Cell candidates：81セル × 9数字のセル候補|
+|`[1214:729]`|Negative triad candidates：9ブロック × 横縦6 triad × 9数字の不在命題の候補|
+|`[1538:1215]`|Configuration candidates：横縦6帯 × 6配置 × 9数字の配置候補|
+
+triad はブロック内の横または縦の3セル。negative 候補は「その数字が3セルに
+入らない」という命題がまだ成立可能であることを表す。帯では、各数字の
+3ブロックにわたる配置を6通りの順列で表す。positive triad は配置候補から生成する。
+negative 候補のビットが1でも、不在が確定したという意味ではない。
+以前の説明のC/N/Pはこの3種類の状態の略記であり、推論規則の
+Claiming / Naked Single / Pointingの略ではない。
+
+推論はブロック側と帯側を交互に更新する。両フェーズで全状態が不変になったら
+固定点とし、完成なら結果を返し、それ以外は配置候補の少ない帯と数字を選ぶ。
+選んだ最大6配置を前半 `floor(n/2)` と残りへ二分し、前半から探索する。
+帯・数字の選択は推論中に2段のレジスターを通して先行計算する。
+
+状態列は **1,539 bit × 512状態 / core** の同期SDP BRAM。探索枝保存と入力を
+1つの書き込みポートで仲裁し、探索枝保存を優先する。均等配置分岐により、
+最大深さは `6 × 9 × ceil(log2(6)) = 162`。兄弟枝162件と空き判別1件を予約する。
+
+`reference/triad.hpp` は推論・分岐の検証用スカラーモデル。
+解の独立照合には引き続き `reference/sudoku.hpp` を使う。
+`rtl/deduction_engine.sv` と `rtl/branch_generator.sv` の旧推論・セル分岐は
+局所試験と比較用に残し、共通セル検査 `analysis` は新コアからも使用する。
+
 ## 実測
+
+以下は従来回路の比較基準。
 
 KV260 実機で 17 ヒント 49,158 問と Hard 1106 の 375 問を CPU 参照解と照合済み。
 準備済み DDR の 10 秒ストレス測定では、17 ヒント集合 **22.34 Mproblem/s**、Hard 1106 **0.7032 Mproblem/s**。入力準備と前後の全解検証は計測外。
