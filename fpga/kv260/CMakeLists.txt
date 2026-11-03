@@ -32,7 +32,7 @@ foreach(stage IN ITEMS bd synth bit)
     add_custom_target(${target} DEPENDS "${stage_dir}/complete.stamp")
 endforeach()
 set(firmware "${out}/firmware/fades")
-add_custom_target(kv260-package
+add_custom_command(OUTPUT "${firmware}/fades.bit.bin" "${firmware}/fades.dtbo" "${firmware}/shell.json"
     COMMAND "${CMAKE_COMMAND}" -DFADES_IMPLEMENTATION_DIR=${out}/implementation
         -P "${scripts}/check_complete.cmake"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${firmware}"
@@ -40,5 +40,9 @@ add_custom_target(kv260-package
         "${CMAKE_CURRENT_SOURCE_DIR}/overlay.dts"
     COMMAND "${CMAKE_COMMAND}" -E copy "${out}/implementation/fades.bit.bin"
         "${CMAKE_CURRENT_SOURCE_DIR}/shell.json" "${firmware}"
-    DEPENDS kv260-bitstream BYPRODUCTS "${firmware}/fades.bit.bin" "${firmware}/fades.dtbo" "${firmware}/shell.json"
+    DEPENDS "${out}/implementation/complete.stamp" "${out}/implementation/build_complete"
+        "${out}/implementation/fades.bit.bin" "${CMAKE_CURRENT_SOURCE_DIR}/overlay.dts"
+        "${CMAKE_CURRENT_SOURCE_DIR}/shell.json" "${scripts}/check_complete.cmake"
     VERBATIM)
+add_custom_target(kv260-package ALL
+    DEPENDS "${firmware}/fades.bit.bin" "${firmware}/fades.dtbo" "${firmware}/shell.json")

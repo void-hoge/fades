@@ -11,6 +11,7 @@ foreach(suite IN ITEMS deduction_engine branch_generator fades_core fades fades_
 endforeach()
 
 foreach(top IN ITEMS fades_core fades fades_axi fades_kv260)
+    set(suite "${top}")
     if(top STREQUAL "fades_core")
         set(sources ${FADES_CORE_RTL})
         set(params)
@@ -21,14 +22,16 @@ foreach(top IN ITEMS fades_core fades fades_axi fades_kv260)
         set(sources ${FADES_AXI_RTL})
         set(params -GCORES=${FADES_CORES})
         if(top STREQUAL "fades_kv260")
+            # Board wrapper checks belong with the AXI integration boundary.
+            set(suite fades_axi)
             list(APPEND sources "${PROJECT_SOURCE_DIR}/fpga/kv260/rtl/fades_kv260.sv")
         endif()
     endif()
     add_test(NAME lint-${top} COMMAND "${VERILATOR_BIN}" --lint-only --language 1800-2017
         -Wall --top-module ${top} ${params} ${sources})
-    set_tests_properties(lint-${top} PROPERTIES LABELS "quick;lint" TIMEOUT 120)
+    set_tests_properties(lint-${top} PROPERTIES LABELS "${suite}" TIMEOUT 120)
 endforeach()
-add_custom_target(lint COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -L lint
-    WORKING_DIRECTORY "${PROJECT_BINARY_DIR}" USES_TERMINAL)
-add_custom_target(formal COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -L formal
-    WORKING_DIRECTORY "${PROJECT_BINARY_DIR}" USES_TERMINAL)
+add_custom_target(lint COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -R "^lint-"
+    WORKING_DIRECTORY "${PROJECT_BINARY_DIR}" USES_TERMINAL VERBATIM)
+add_custom_target(formal COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -R "^formal-"
+    WORKING_DIRECTORY "${PROJECT_BINARY_DIR}" USES_TERMINAL VERBATIM)

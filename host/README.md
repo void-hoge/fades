@@ -18,13 +18,12 @@ PS は問題の選択・反復と入出力バッファを管理し、PL はス�
 
 ## ビルド
 
-リポジトリのルートから:
+KV260上のリポジトリルートから:
 
 ```sh
-cmake --preset host-kv260
-cmake --build --preset host-kv260 --parallel 4
-cmake --build --preset host-kv260 --target host-module
-ctest --preset host-kv260
+cmake --preset kv260-ps
+cmake --build --preset kv260-ps
+ctest --preset kv260-ps
 ```
 
 必要ツールはCMake 3.25以降、Ninja、C++20、Python 3。
@@ -33,12 +32,17 @@ Ubuntu / Arm64では `build-essential cmake ninja-build python3` と
 `linux-headers-$(uname -r)` が必要。ヘッダーが別の場所ならconfigure時に
 `-DFADES_KERNEL_BUILD=/path/to/kernel/build` を指定する。
 
-ホストツールは `build/host-kv260/host/`、モジュールはその `driver/fades.ko` に生成する。
-開発機では `host-native` プリセットを使う（出力は `build/host-native/host/`）。
-RTLツールは不要。入力試験はCTestで実行し、実機ABI試験はロード後に
+通常のbuildでホストツールとドライバーを両方生成する。
+ホストツールは `build/kv260-ps/host/`、モジュールはその `driver/fades.ko` に生成する。
+`kv260-ps` は実機上のネイティブビルドで、RTLツール・Vivadoは不要。
+入力試験はCTestで実行し、実機ABI試験はロード後に
 `python3 host/tests/check_abi.py` で実行する。
 コンパイラーやフラグは `CMAKE_CXX_COMPILER`、`CMAKE_CXX_FLAGS` で指定できる。
 Linux Kbuildを呼び出すため、`host/driver/Makefile` は保持する。
+ドライバーのソースは変更時のみビルド先へコピーし、Kbuildがヘッダーを含む依存関係を確認する。
+開発機では `host` プリセットを使い、C++ツールとRTLシミュレーションをビルドする。
+実行ファイルは `build/host/host/` に生成し、開発機のカーネルヘッダーは要求しない。
+ソース・firmwareの実機へのコピーはユーザーが行い、CMakeから自動転送は行わない。
 回路の転送・ロード・デバイス作成は [KV260 手順](../fpga/kv260/README.md) を参照。
 
 ## メモリと転送
@@ -91,10 +95,10 @@ statusは0=解あり、1=解なし、2=不正セル。解なし・不正セル�
 ## `fades_verify`
 
 ```sh
-build/host-kv260/host/fades_verify DATASET RECORDS_PER_PACKET SLOTS ROUNDS [mixed]
-build/host-kv260/host/fades_verify sim/data/17puz49158.txt 8193 6 1
-build/host-kv260/host/fades_verify sim/data/17puz49158.txt 1024 3 1 mixed
-build/host-kv260/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
+build/kv260-ps/host/fades_verify DATASET RECORDS_PER_PACKET SLOTS ROUNDS [mixed]
+build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 8193 6 1
+build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 1024 3 1 mixed
+build/kv260-ps/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
 ```
 
 ファイルを巡回して各 slot に同数の問題を入れる。`8193 6` は 49,158 問を一巡する。
@@ -115,8 +119,8 @@ build/host-kv260/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
 ## `fades_benchmark`
 
 ```sh
-build/host-kv260/host/fades_benchmark PUZZLE_FILE SECONDS
-build/host-kv260/host/fades_benchmark sim/data/17puz49158.txt 10
+build/kv260-ps/host/fades_benchmark PUZZLE_FILE SECONDS
+build/kv260-ps/host/fades_benchmark sim/data/17puz49158.txt 10
 ```
 
 引数は問題ファイルと実行時間だけ。秒数は有限の `0.001〜86400`、小数も指定可能。
