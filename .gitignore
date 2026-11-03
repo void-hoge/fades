@@ -1,7 +1,15 @@
 /build/
 /results/
 /docs/
+/tmp/
 /.Xil/
 /vivado*.log
 /vivado*.jou
 __pycache__/
+/CMakeUserPresets.json
+
+# Local workstation instructions and scratch notes.
+/AGENTS.md
+/note.md
+/.#*
+/#*#

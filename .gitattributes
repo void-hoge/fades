@@ -1,0 +1,2 @@
+# Preserve the upstream puzzle files byte-for-byte, including CRLF line endings.
+sim/data/*.txt -text whitespace=cr-at-eol
