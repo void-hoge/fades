@@ -21,16 +21,24 @@ PS は問題の選択・反復と入出力バッファを管理し、PL はス�
 リポジトリのルートから:
 
 ```sh
-make host                     # build/host/fades_verify と fades_benchmark
-make host-module              # 実行中 Linux のヘッダーで fades.ko をビルド
+cmake --preset host-kv260
+cmake --build --preset host-kv260 --parallel 4
+cmake --build --preset host-kv260 --target host-module
+ctest --preset host-kv260
 ```
 
-モジュールは KV260 上で、その実行中カーネルに対応したヘッダーを使ってビルドする。
-Ubuntu / Arm64 では `build-essential` と `linux-headers-$(uname -r)` が必要。
-ヘッダーが別の場所なら `KDIR=/path/to/kernel/build` を指定する。
+必要ツールはCMake 3.25以降、Ninja、C++20、Python 3。
+モジュールはKV260上で、その実行中カーネルに対応したヘッダーを使ってビルドする。
+Ubuntu / Arm64では `build-essential cmake ninja-build python3` と
+`linux-headers-$(uname -r)` が必要。ヘッダーが別の場所ならconfigure時に
+`-DFADES_KERNEL_BUILD=/path/to/kernel/build` を指定する。
 
-`make -C host` と `make -C host module` も利用でき、既定出力先は同じ。
-`OUT=/absolute/output/path`、`CXX=...`、`CXXFLAGS=...` を上書きできる。
+ホストツールは `build/host-kv260/host/`、モジュールはその `driver/fades.ko` に生成する。
+開発機では `host-native` プリセットを使う（出力は `build/host-native/host/`）。
+RTLツールは不要。入力試験はCTestで実行し、実機ABI試験はロード後に
+`python3 host/tests/check_abi.py` で実行する。
+コンパイラーやフラグは `CMAKE_CXX_COMPILER`、`CMAKE_CXX_FLAGS` で指定できる。
+Linux Kbuildを呼び出すため、`host/driver/Makefile` は保持する。
 回路の転送・ロード・デバイス作成は [KV260 手順](../fpga/kv260/README.md) を参照。
 
 ## メモリと転送
@@ -83,10 +91,10 @@ statusは0=解あり、1=解なし、2=不正セル。解なし・不正セル�
 ## `fades_verify`
 
 ```sh
-build/host/fades_verify DATASET RECORDS_PER_PACKET SLOTS ROUNDS [mixed]
-build/host/fades_verify sim/data/17puz49158.txt 8193 6 1
-build/host/fades_verify sim/data/17puz49158.txt 1024 3 1 mixed
-build/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
+build/host-kv260/host/fades_verify DATASET RECORDS_PER_PACKET SLOTS ROUNDS [mixed]
+build/host-kv260/host/fades_verify sim/data/17puz49158.txt 8193 6 1
+build/host-kv260/host/fades_verify sim/data/17puz49158.txt 1024 3 1 mixed
+build/host-kv260/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
 ```
 
 ファイルを巡回して各 slot に同数の問題を入れる。`8193 6` は 49,158 問を一巡する。
@@ -107,8 +115,8 @@ build/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
 ## `fades_benchmark`
 
 ```sh
-build/host/fades_benchmark PUZZLE_FILE SECONDS
-build/host/fades_benchmark sim/data/17puz49158.txt 10
+build/host-kv260/host/fades_benchmark PUZZLE_FILE SECONDS
+build/host-kv260/host/fades_benchmark sim/data/17puz49158.txt 10
 ```
 
 引数は問題ファイルと実行時間だけ。秒数は有限の `0.001〜86400`、小数も指定可能。

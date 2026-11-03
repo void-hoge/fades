@@ -5,15 +5,14 @@ import subprocess
 import sys
 import tempfile
 
-root = pathlib.Path(__file__).resolve().parents[2]
-binary_dir = pathlib.Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root / "build/host"
+binary_dir = pathlib.Path(sys.argv[1]).resolve()
 tools = ((binary_dir / "fades_verify", ["1", "1", "1"]),
          (binary_dir / "fades_benchmark", ["0.001"]))
 bad_inputs = [b"", b"."*80+b"\n", b"."*82+b"\n",
               b"."*81+b" \n", b" "+b"."*81+b"\n"]
 bad_inputs += [b"."*40+bytes([ch])+b"."*40+b"\n" for ch in b"0- x\t\r"]
 
-with tempfile.TemporaryDirectory(prefix="input-", dir=root / "build") as temp:
+with tempfile.TemporaryDirectory(prefix="input-", dir=binary_dir) as temp:
     for tool, arguments in tools:
         result = subprocess.run([str(tool)], capture_output=True, text=True)
         assert result.returncode != 0 and f"Usage: {tool.name}" in result.stderr

@@ -1,0 +1,5 @@
+set(rtl "${PROJECT_SOURCE_DIR}/rtl/deduction_engine.sv")
+fades_iverilog(deduction-engine tb_deduction_engine SOURCES "${rtl}" "${CMAKE_CURRENT_SOURCE_DIR}/tb_deduction_engine.sv")
+fades_formal(formal-deduction-engine formal_deduction_engine "${rtl}" "${CMAKE_CURRENT_SOURCE_DIR}/formal_deduction_engine.sv")
+fades_formal(formal-row-changes formal_row_changes "${rtl}" "${CMAKE_CURRENT_SOURCE_DIR}/formal_deduction_engine.sv")
+fades_formal(formal-locked-masks formal_locked_masks "${rtl}" "${CMAKE_CURRENT_SOURCE_DIR}/formal_locked_masks.sv")

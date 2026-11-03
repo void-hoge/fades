@@ -1,7 +1,8 @@
 # KV260 ボード実装
 
 FPGA アプリは **`fades`**、Linux デバイスは **`/dev/fades`**、
-Linux モジュールは **`fades.ko`**。現行構成は 6 コア / 100 MHz、DMA / AXI-Lite は 200 MHz。
+Linux モジュールは **`fades.ko`**。既定構成は6コア / 100 MHz、DMA / AXI-Liteは200 MHz。
+`FADES_CORES` で1〜6コアを指定できる。
 
 ## ハードウェア
 
@@ -19,16 +20,16 @@ Linux モジュールは **`fades.ko`**。現行構成は 6 コア / 100 MHz、D
 
 |ファイル|用途 / 使われる場所|
 |---|---|
-|`build.tcl`|`make vivado-kv260` の入口。回路生成から実装・検査・firmware出力まで|
-|`export.tcl`|`build.tcl`から呼ばれる。実装済み回路の検査とfirmware/XSA出力|
-|`build_core.tcl`|`make vivado-core`。KV260上の単一コアOOC評価|
-|`fades_kv260.sv`|IP Integratorと`rtl/solver_axi.sv`を接続する薄いラッパー|
+|`CMakeLists.txt`|Vivado実行とfirmwareパッケージの定義|
+|`scripts/build.tcl`|回路生成から実装・検査・firmware出力まで|
+|`scripts/export.tcl`|`build.tcl`から呼ばれる。実装済み回路の検査とfirmware/XSA出力|
+|`rtl/fades_kv260.sv`|IP Integratorとリポジトリ直下の`rtl/fades_axi.sv`を接続するラッパー|
 |`overlay.dts`|LinuxにDMA・IRQ・クロック・制御レジスターを教えるDevice Tree|
 |`shell.json`|`xmutil`がFPGAアプリを認識するための定義|
 
 `constraints/` の `fan.xdc` はファン端子、`solver_cdc.xdc` はクロック境界の
-タイミング制約、`core_ooc.xdc` は開発用の単一コア評価に使用する。
-CDCの保持バス・固定設定・resetに対するレビュー根拠は`export.tcl`内の出力検査に記載する。
+タイミング制約。CDCの保持バス・固定設定・resetに対するレビュー根拠は
+`scripts/export.tcl` 内の出力検査に記載する。
 
 Vivado 2024.2のmodule-referenceはSystemVerilog型の入口を受け付けないため、
 Verilog互換構文だけの`fades_kv260.sv`に限り、生成時の`FILE_TYPE`をVerilogに指定する。
@@ -36,54 +37,69 @@ Verilog互換構文だけの`fades_kv260.sv`に限り、生成時の`FILE_TYPE`�
 
 ## 開発機で生成
 
-Vivado 2024.2 と K26 デバイスサポート、`dtc` を用意し、リポジトリルートで実行する。
+必要ツールはCMake 3.25以降、Ninja、Vivado 2024.2とK26デバイスサポート、`dtc`。
+リポジトリルートで実行する。
 Vivado 配下の XilinxBoardStore を参照するため、Vivado の環境を設定しておく。
 
 ```sh
-make lint test stream-test
-make fifo-test
-make vivado-kv260 JOBS=2
-make package-kv260
+cmake --preset fpga-kv260 -DFADES_CORES=6 -DFADES_VIVADO_JOBS=2
+cmake --build --preset fpga-kv260 --target kv260-package
 ```
 
-既定出力は `build/kv260/`。`KV260_OUT` で変更できる。
-`KV260_STAGE=bd/synth/bit/export` を指定でき、既定は `bit`。
-bd/synth/bit はプロジェクトを作り直し、export は既存の実装済みプロジェクトから再出力する。
-export は setup/hold/pulse-width、CDC、bus skew、ファン端子を確認し、成功時のみ
-`build_complete` を作成する。`package-kv260` はこの印を要求する。
+`FADES_CORES` は既定6、対応範囲は1〜6。ボードトップ→AXI制御→コア群へ伝播する。
+単一コアもこの実装経路を使う。ABIは6コア分のカウンター領域を保持し、未実装分は0。
+
+既定出力は `build/fpga-kv260/fpga/kv260/`。configure時の `-B` で変更できる。
+`VIVADO_EXECUTABLE` と `DTC_EXECUTABLE` でツールのパスを明示指定できる。
+`FADES_VIVADO_JOBS` はVivado内部の並列数で、CMakeの `--parallel` とは独立。
+
+|ターゲット|処理|
+|---|---|
+|`kv260-bd`|BD生成・検証のみ（`bd/`）|
+|`kv260-synth`|合成まで（`synth/`）|
+|`kv260-bitstream`|配置配線・bitstream生成・出力検査（`implementation/`）|
+|`kv260-package`|必要ならbitstreamを生成し、DTBOと合わせてfirmwareを配置|
+
+各段階は独立したプロジェクトを使い、ソース・制約・コア数の変更で再生成する。
+出力検査はsetup/hold/pulse-width、CDC、bus skew、ファン端子を確認し、成功時のみ
+`build_complete` を作成する。パッケージもこの印を要求する。
 
 主要な生成物:
 
 ```text
-build/kv260/
+build/fpga-kv260/fpga/kv260/
   firmware/fades/       fades.bit.bin, fades.dtbo, shell.json
-  timing_summary.rpt   setup / hold / pulse-width と未制約経路
-  utilization.rpt      LUT / FF / CLB / BRAM / URAM
-  cdc.rpt              レビュー済み CDC
-  bus_skew.rpt         保持バス・FIFO pointer の skew
-  io.rpt, drc.rpt       ファン端子と DRC
-  verified_routed.dcp   検査済み checkpoint
-  fades.xsa            ハードウェア定義
-  project/             Vivado プロジェクトと詳細 runme.log
+  implementation/
+    timing_summary.rpt   setup / hold / pulse-width と未制約経路
+    utilization.rpt      LUT / FF / CLB / BRAM / URAM
+    cdc.rpt              レビュー済み CDC
+    bus_skew.rpt         保持バス・FIFO pointer の skew
+    io.rpt, drc.rpt       ファン端子と DRC
+    verified_routed.dcp   検査済み checkpoint
+    fades.xsa            ハードウェア定義
+    project/             Vivado プロジェクトと詳細 runme.log
 ```
 
 ## ソースと firmware を実機へ転送
 
-以下は SSH で root に接続できる実機を `BOARD` に指定する例。
-実機作業ディレクトリは `/root/fades/solver/` とする。
+SSHエイリアス `kria` でrootに接続する。実機作業ディレクトリは `/root/fades/cmake/` とする。
 初回は `/root/fades` を用意し、既存の内容を確認してから転送する。
 
 ```sh
-BOARD=root@kv260
-ssh "$BOARD" 'ls /root/fades'
-ssh "$BOARD" 'mkdir -p /root/fades/solver/sim /root/fades/solver/firmware'
-scp -r host reference "$BOARD":/root/fades/solver/
-scp -r sim/data "$BOARD":/root/fades/solver/sim/
-scp build/kv260/firmware/fades/* "$BOARD":/root/fades/solver/firmware/
-ssh "$BOARD" 'make -C /root/fades/solver/host tools module'
+ssh kria 'ls /root/fades'
+ssh kria 'mkdir -p /root/fades/cmake/sim /root/fades/cmake/firmware'
+scp CMakeLists.txt CMakePresets.json kria:/root/fades/cmake/
+scp -r host reference kria:/root/fades/cmake/
+scp -r sim/data kria:/root/fades/cmake/sim/
+scp build/fpga-kv260/fpga/kv260/firmware/fades/* kria:/root/fades/cmake/firmware/
+ssh kria 'cmake --preset host-kv260 -S /root/fades/cmake'
+ssh kria 'cmake --build /root/fades/cmake/build/host-kv260 --parallel 4'
+ssh kria 'cmake --build /root/fades/cmake/build/host-kv260 --target host-module'
+ssh kria 'ctest --test-dir /root/fades/cmake/build/host-kv260 --output-on-failure'
 ```
 
 モジュールは実行中カーネルに対応したヘッダーでビルドする。
+実機には `build-essential cmake ninja-build python3` と対応するカーネルヘッダーが必要。
 ヘッダーの場所や出力先の指定は [PS ソフトウェア](../../host/README.md) を参照。
 
 ## ロードと試験
@@ -92,19 +108,19 @@ ssh "$BOARD" 'make -C /root/fades/solver/host tools module'
 
 ```sh
 mkdir -p /lib/firmware/xilinx/fades
-cp /root/fades/solver/firmware/* /lib/firmware/xilinx/fades/
+cp /root/fades/cmake/firmware/* /lib/firmware/xilinx/fades/
 if test -d /sys/module/fades; then rmmod fades; fi
 xmutil unloadapp
 xmutil loadapp fades
 xmutil listapps
-insmod /root/fades/solver/build/host/driver/fades.ko
+insmod /root/fades/cmake/build/host-kv260/host/driver/fades.ko
 ls -l /dev/fades
-python3 /root/fades/solver/host/tests/check_abi.py
-/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/17puz49158.txt 1 1 1
-/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/17puz49158.txt 1024 3 1 mixed
-/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/17puz49158.txt 8193 6 1
-/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/HardestDatabase110626.txt 375 1 1
-/root/fades/solver/build/host/fades_benchmark /root/fades/solver/sim/data/17puz49158.txt 10
+python3 /root/fades/cmake/host/tests/check_abi.py
+/root/fades/cmake/build/host-kv260/host/fades_verify /root/fades/cmake/sim/data/17puz49158.txt 1 1 1
+/root/fades/cmake/build/host-kv260/host/fades_verify /root/fades/cmake/sim/data/17puz49158.txt 1024 3 1 mixed
+/root/fades/cmake/build/host-kv260/host/fades_verify /root/fades/cmake/sim/data/17puz49158.txt 8193 6 1
+/root/fades/cmake/build/host-kv260/host/fades_verify /root/fades/cmake/sim/data/HardestDatabase110626.txt 375 1 1
+/root/fades/cmake/build/host-kv260/host/fades_benchmark /root/fades/cmake/sim/data/17puz49158.txt 10
 ```
 
 `xmutil` の終了値に加え、listapps、デバイスの存在、機能試験でロードを確認する。

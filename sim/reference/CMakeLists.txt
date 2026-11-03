@@ -1,0 +1,7 @@
+add_executable(reference_test reference_test.cpp)
+target_link_libraries(reference_test PRIVATE sudoku_reference)
+target_compile_options(reference_test PRIVATE -Wall -Wextra -Werror)
+add_test(NAME reference-quick COMMAND reference_test)
+set_tests_properties(reference-quick PROPERTIES LABELS quick TIMEOUT 120)
+add_test(NAME reference-full COMMAND reference_test "${FADES_DATASET}")
+set_tests_properties(reference-full PROPERTIES LABELS full TIMEOUT 1800)

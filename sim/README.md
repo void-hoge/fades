@@ -1,66 +1,87 @@
-# 開発・検証の入口
+# RTL・参照実装の検証
 
-ここは実機ユーザー用のアプリではなく、RTL を変更するときの試験コード。
-個々のテストファイルを直接実行せず、リポジトリルートの Make ターゲットから使う。
-CPU 照合には PS ツールと共通の `reference/sudoku.hpp` を使用する。
+テストは目的別のディレクトリにまとめ、各 `CMakeLists.txt` がソース・生成物・
+実行条件を定義する。他の試験のコードや生成物には依存しない。
+CPU照合はPSツールと共通の `reference/sudoku.hpp` を使う。
 
-## 何を確認するか
+## 実行
 
-|目的|コマンド|実機 / 必要ツール|
+必要ツール: CMake 3.25以降、Ninja、C++20、Python 3、Icarus Verilog、Verilator、Yosys。
+実XPMの試験にはVivado 2024.2のxsimを使う。
+
+```sh
+cmake --preset sim -DFADES_CORES=6
+cmake --build --preset sim --parallel 4
+ctest --preset sim -L quick
+ctest --preset sim -L full
+ctest --preset sim -L formal
+ctest --preset sim -L xpm
+```
+
+ラベルを省略すると登録済みの全試験を実行する。`-R` で名前による選択もできる。
+1コア構成は `-DFADES_CORES=1`。並存させる場合は `-B build/sim-check-1core` 等で
+出力先を変え、build/CTestにもそのディレクトリを指定する。
+コア数を同じ出力先で変更した場合も、再configure・buildで生成コードを更新する。
+
+`xvlog` がPATH上または `$XILINX_VIVADO/bin` にない場合、XPM試験は登録しない。
+`-DXVLOG_EXECUTABLE=/tools/Xilinx/Vivado/2024.2/bin/xvlog` で明示指定できる。
+問題集は `-DFADES_DATASET=/absolute/path/to/dataset.txt` で変更可能。
+
+## 試験一覧
+
+|ディレクトリ|試験名・ラベル|目的|
 |---|---|---|
-|基本的な推論・分岐・制御の試験|`make test`|実機不要、Icarus / C++20|
-|単一コアの全問・ストレス試験|`make core-test`|実機不要、Verilator / C++20|
-|コア群と供給・回収系の全体試験|`make stream-test`|実機不要、Verilator / C++20|
-|RTL の構造・ラッチ不在|`make lint synth`|実機不要、Verilator / Yosys|
-|推論・分岐の等価性証明|`make formal`|実機不要、Yosys|
-|本物の XPM 非同期 FIFO|`make fifo-test`|実機不要、Vivado xsim|
-|問題集の解の存在・一意性|`make reference-full`|実機不要、独立 CPU 参照|
-|Linux インターフェース|`python3 host/tests/check_abi.py`|ロード済み KV260|
-|PS ツールの入力形式|`make host-input-test`|実機不要|
+|`deduction_engine/`|`deduction-engine` / quick|Singles、Locked Candidates、既知問題の推論ステップ|
+|同上|`formal-deduction-engine`、`formal-row-changes`、`formal-locked-masks` / formal|推論・行変化・共通マスクと独立仕様の等価性|
+|`branch_generator/`|`branch-generator` / quick、`formal-branch-generator` / formal|候補分割の有向試験・独立逐次仕様との等価性|
+|`fades_core/`|`core-quick`、`core-full` / quick・full|単一コアのCPU照合、順序、探索・矛盾・バックトラック、入出力停止、キュー周回、reset、サイクル集計|
+|同上|`synth-core` / quick・synth|RAMを保持する構造合成とラッチ不在|
+|`fades/`|`stream-quick`、`stream-full` / quick・full|コア群・非同期クロック・ID対応、無解・不正セル、満杯・出力停止、部分入力・未回収出力のreset|
+|`fades_axi/`|`axi` / quick|AW/W独立受理、WSTRB、応答停止、設定保護、snapshot、未実装コアのカウンター0|
+|`async_queue/`|`xpm-queue` / xpm|実XPMのfull/count・周回・停止・reset|
+|`reference/`|`reference-quick`、`reference-full` / quick・full|CPU参照実装・入力形式、全問題集の解の存在・一意性|
+|全体|`lint-fades_core`、`lint-fades`、`lint-fades_axi`、`lint-fades_kv260` / quick・lint|各階層のVerilator lint|
 
-`core-test` は全49,158問と追加4,096件を検証する。解・ヒント保持・順序に加え、
-探索・矛盾・バックトラック、入出力停止、キュー周回、reset とサイクル集計を確認する。
-`stream-test` は非調和な2クロックでID対応・結果順・先行投入上限を確認し、
-解なし、不正セル値、FIFO満杯、停止中のデータ保持、部分入力・未回収出力のresetも試験する。
-短縮するときは `LIMIT=512`、ビルド並列数は `JOBS=4` 等を指定する。
+quickのコア・統合試験は問題集の先頭512件を使い、ストレス試験も実行する。
+fullでは既定の全49,158問を使い、コア試験には追加4,096件のストレス入力がある。
+Verilator用キューは64エントリの抽象モデル。XPMのFWFT段・初期化レイテンシは
+cycle単位では再現しないため、実キューの性質をxsimでも確認する。
 
-## テストファイルの役割
+`lint`、`synth`、`formal`、`fifo-test` のビルドターゲットから該当検査を実行することもできる。
+ホスト試験は [host/README.md](../host/README.md) を参照。
 
-|ファイル|呼び出すターゲット / 役割|
-|---|---|
-|`cpp/core_test.cpp`|`core-test`。単一コアをcycle単位で駆動し、CPU照合とCSV出力|
-|`cpp/stream_test.cpp`|`stream-test`。64-byteレコードを送受信してコア群を試験|
-|`cpp/reference_test.cpp`|`test` / `reference-full`。CPU参照ソルバーとテキスト形式を試験|
-|`tb/tb_inference.sv`、`tb/tb_branch.sv`|`test`。推論規則と候補分割の有向試験|
-|`tb/tb_solver_axi.sv`|`test` / `axi-test`。AW/W独立受理、WSTRB、応答停止、設定保護|
-|`tb/tb_async_fifo_xpm.sv`|`fifo-test`。実際のXPMでfull/count/周回/停止/resetを試験|
-|`formal/formal_branch.sv`|`formal`。分岐選択器を独立した逐次仕様と比較|
-|`formal/formal_inference.sv`|`formal`。共通解析・推論・行変化検出の仕様と比較|
-|`formal/formal_locked_masks.sv`|`formal`。共有したLocked Candidatesマスクを独立仕様と比較|
-|`scripts/core_results.py`|`core-test` / `regression`。CSVの集計・完全回帰比較|
-|`scripts/xpm_fifo_test.py`|`fifo-test`。VivadoのXPMライブラリーを使ってxsimを起動|
-|`data/17puz49158.txt`、`data/HardestDatabase110626.txt`|BinarySudoku原本の問題集。出所は [data/README](data/README.md)|
+## 出力・サイクル回帰
 
-Verilator の FIFO は64エントリの抽象モデル。XPM のFWFT段・初期化レイテンシを
-cycle単位で再現しないため、実FIFOの性質は `fifo-test` で別に確認する。
+生成物は選択したビルドディレクトリの `sim/<試験ディレクトリ>/` に置く。
+各試験の作業ディレクトリも独立している。
 
-## サイクル回帰と単一コア実装評価
-
-`core-test` は `build/core/results.csv`、隣接する `.totals.json`、`summary.json` を生成する。
-CSVは問題ごとの完了間隔、totalsは最後の出力排出も含む全体値。
-既存の完全実行を基準にする場合:
+コア試験は `sim/fades_core/quick/` と `full/` に、それぞれ `results.csv` と
+`results.csv.totals.json` を生成する。CSVは問題ごとの完了間隔、totalsは最後の出力排出を含む全体値。
 
 ```sh
-make regression BASELINE=/path/to/saved/results.csv
+ctest --preset sim -R '^core-full$'
+cmake --build --preset sim --target core-summary
+
+cmake --preset sim -DFADES_BASELINE=/absolute/path/to/saved/results.csv
+cmake --build --preset sim --target regression
 ```
 
-49,158問+4,096件のCSVとtotalsの完全一致を確認する。保存時には両ファイルが必要。
+`core-summary` はfullのCSVから `summary.json` を生成する。
+`regression` はベースラインの指定時に有効になり、49,158問+4,096件のCSVとtotalsの
+完全一致を確認する。ベースラインは両ファイルを保存すること。
 
-```sh
-make vivado-core PERIOD=9.090909
-```
+単一コアのHWはボード実装を `FADES_CORES=1` で生成する。
+詳細は [KV260ビルド手順](../fpga/kv260/README.md)。
 
-これは `fpga/kv260/build_core.tcl` で単一コアをOOC配置配線する開発用評価。
-生成先は `build/vivado_single_core/`、主な結果は `timing_summary.rpt`、
-`utilization.rpt`、`summary.txt`。実機用ビットストリームは生成しない。
-実機ロード用は [KV260 のビルド](../fpga/kv260/README.md) を使う。
+## 問題集
+
+`data/` の2ファイルはBinarySudokuの原本で、ファイル名・内容・CRLFを保持する。
+1行81文字、空欄 `.`、ヒント `1`〜`9`、行優先。
+
+|ファイル|問題数|用途|
+|---|---:|---|
+|`17puz49158.txt`|49,158|17ヒント集合、試験と測定の既定入力|
+|`HardestDatabase110626.txt`|375|探索負荷の大きい難問集合|
+
+出所: [BinarySudoku problems/9x9](https://github.com/void-hoge/binarysudoku/tree/a494907924083cbfc9e14a74c75f614ead752c28/problems/9x9)
+（commit `a494907924083cbfc9e14a74c75f614ead752c28`）。`.gitattributes` で原本の改行を維持する。

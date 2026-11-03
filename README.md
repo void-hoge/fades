@@ -4,7 +4,7 @@ KV260 向けの SystemVerilog 数独ソルバー。Singles / Locked Candidates �
 並列適用し、停滞時は候補を二分して深さ優先探索する。
 PS の Linux プログラムから DDR / AXI DMA 経由で問題を投入し、ID 付きの結果を回収する。
 
-現行の実機構成は **6 コア × 100 MHz、DMA 200 MHz**。
+既定の実機構成は **6 コア × 100 MHz、DMA 200 MHz**。コア数は1〜6で指定できる。
 最初の解を返し、解なしも結果を 1 件返す。問題の一意性を証明する処理ではない。
 
 ## 1. 実機を使う
@@ -13,10 +13,11 @@ FPGA アプリとドライバーをロード済みの KV260 上で実行する�
 提供する入口は、時間指定の性能測定と、件数指定の正当性確認の2つ。
 
 ```sh
-make host                                          # KV260上でPSプログラムをビルド
-build/host/fades_benchmark sim/data/17puz49158.txt 10     # 10秒の性能測定
-build/host/fades_verify sim/data/17puz49158.txt 8193 6 1  # 全49,158問の解を照合
-build/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1  # 難問375問
+cmake --preset host-kv260                          # KV260上でconfigure
+cmake --build --preset host-kv260 --parallel 4
+build/host-kv260/host/fades_benchmark sim/data/17puz49158.txt 10
+build/host-kv260/host/fades_verify sim/data/17puz49158.txt 8193 6 1
+build/host-kv260/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
 ```
 
 ```text
@@ -34,12 +35,12 @@ build/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1  # 難問375�
 開発機で回路を生成し、KV260 上で PS プログラムとドライバーをビルドしてロードする。
 
 ```sh
-# 開発機: Vivado 2024.2 + K26サポート、dtc
-make vivado-kv260 JOBS=2
-make package-kv260
+# 開発機: CMake 3.25以降、Ninja、Vivado 2024.2 + K26サポート、dtc
+cmake --preset fpga-kv260 -DFADES_CORES=6 -DFADES_VIVADO_JOBS=2
+cmake --build --preset fpga-kv260 --target kv260-package
 ```
 
-生成物は `build/kv260/firmware/fades/`。KV260 で `xmutil loadapp fades` と
+生成物は `build/fpga-kv260/fpga/kv260/firmware/fades/`。KV260 で `xmutil loadapp fades` と
 `insmod fades.ko` を実行すると **`/dev/fades`** が使える。
 転送・Arm64 ビルド・ロードの手順と、各ボード用ファイルの役割は
 [fpga/kv260/README.md](fpga/kv260/README.md) にまとめる。
@@ -47,14 +48,41 @@ make package-kv260
 ## 3. 開発・検証する
 
 ```sh
-make test lint            # 推論・分岐・CPU参照・AXI-Liteの基本試験
-make core-test            # 単一コアの全問・ストレス試験
-make stream-test          # コア群・非同期入出力・ID対応の全体試験
+cmake --preset sim -DFADES_CORES=6
+cmake --build --preset sim --parallel 4
+ctest --preset sim -L quick   # 有向試験、コア・統合短縮試験、lint・構造合成
+ctest --preset sim -L full    # 全問題集のコア・統合・CPU参照試験
+ctest --preset sim -L formal  # 推論・分岐の形式検証
+ctest --preset sim -L xpm     # Vivado xsimによる実XPMキュー試験
 ```
 
-形式検証、XPM FIFO、回帰比較、単一コアの面積・タイミング評価は
-[sim/README.md](sim/README.md)。必要ツールは GNU Make、C++20、Python 3、
-Icarus Verilog、Verilator、Yosys。コマンドの一覧は `make help`。
+試験の詳細と回帰比較は [sim/README.md](sim/README.md)。必要ツールは
+CMake 3.25以降、Ninja、C++20、Python 3、Icarus Verilog、Verilator、Yosys。
+XPM試験にはVivadoが必要。ホストのみのビルドではRTLツールは不要。
+
+### ビルド対象と出力の分離
+
+|プリセット|用途|出力先|
+|---|---|---|
+|`host-native`|開発機のホストツール・入力試験|`build/host-native/`|
+|`host-kv260`|KV260上のネイティブビルド・ドライバー|`build/host-kv260/`|
+|`sim`|RTLシミュレーション・検証|`build/sim/`|
+|`fpga-kv260`|KV260回路・firmware生成|`build/fpga-kv260/`|
+
+コア数はプリセットとは独立した `-DFADES_CORES=1`〜`6`（既定6）。
+ボードトップからコア群まで伝播し、シミュレーションにも同じ値を使う。
+ホストABIの6コア分のカウンターレイアウトは固定で、未実装コア分は0になる。
+構成変更時は同じビルドディレクトリで再configureしてからビルドする。
+複数構成を保持するときは `-B` で出力先を分ける:
+
+```sh
+cmake --preset sim -B build/sim-check-1core -DFADES_CORES=1
+cmake --build build/sim-check-1core --parallel 4
+ctest --test-dir build/sim-check-1core --output-on-failure -L quick
+```
+
+ツールのパスなどのローカル設定は `CMakeUserPresets.json` に記述できる（Git管理外）。
+一覧は `cmake --list-presets`、試験一覧は `ctest --preset sim -N`。
 
 ## ソースを読む順序
 
@@ -62,10 +90,10 @@ Icarus Verilog、Verilator、Yosys。コマンドの一覧は `make help`。
 |---|---|---|
 |PS利用|`host/tools/fades_benchmark.cpp` / `fades_verify.cpp`|性能測定 / 解の照合|
 |Linux接続|`host/include/fades_ioctl.h` → `host/driver/fades.c`|公開ABI → バッファ・DMA・制御|
-|ボード生成|`fpga/kv260/build.tcl`|PS・DMA・クロックの接続、実装、出力検査|
-|PLの入口|`rtl/solver_axi.sv` → `solver_stream.sv`|制御 → 供給・ID管理・結果回収・コア群|
-|探索|`rtl/core.sv` → `inference.sv` / `branch.sv`|状態列・探索 → 推論 / 分岐|
-|クロック境界|`rtl/async_fifo.sv`|XPM非同期FIFOと試験用モデル|
+|ボード生成|`fpga/kv260/scripts/build.tcl`|PS・DMA・クロックの接続、実装、出力検査|
+|PLの入口|`rtl/fades_axi.sv` → `fades.sv`|制御 → 供給・ID管理・結果回収・コア群|
+|探索|`rtl/fades_core.sv` → `deduction_engine.sv` / `branch_generator.sv`|状態列・探索 → 推論 / 分岐|
+|クロック境界|`rtl/async_queue.sv`|XPM非同期FIFOと試験用モデル|
 |CPU照合|`reference/sudoku.hpp`|PSツールとRTL試験が共有する独立参照ソルバー|
 
 `build/` は生成物、`results/` は生ログ・実験履歴、`docs/` はローカル設計メモ。
@@ -77,4 +105,4 @@ KV260 実機で 17 ヒント 49,158 問と Hard 1106 の 375 問を CPU 参照�
 Hard 1106 **0.7032 Mproblem/s**。入力準備と前後の全解検証は計測外。
 6コア100 MHz / DMA 200 MHz、131,072件を反復する条件で、件数は延べ投入数。
 計測中は DMA 完了・PL件数を検査し、前後のバッチを全件検証する。
-入力データの出所は [sim/data/README.md](sim/data/README.md)。
+入力データの出所は [sim/README.md](sim/README.md#問題集)。
