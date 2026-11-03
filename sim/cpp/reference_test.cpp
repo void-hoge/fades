@@ -1,4 +1,4 @@
-#include "reference_solver.hpp"
+#include "sudoku.hpp"
 #include <chrono>
 #include <fstream>
 #include <iostream>

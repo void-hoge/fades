@@ -1,12 +1,13 @@
 /build/
 /results/
+/docs/
 /tmp/
 /.Xil/
 /vivado*.log
 /vivado*.jou
 __pycache__/
 
-# Local workstation instructions and scratch notes. Public documentation is in docs/.
+# Local workstation instructions and scratch notes.
 /AGENTS.md
 /note.md
 /.#*

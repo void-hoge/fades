@@ -2,7 +2,7 @@
 // the half-full starting state is built exclusively through ready/valid input.
 #include "Vcore.h"
 #include "verilated.h"
-#include "reference_solver.hpp"
+#include "sudoku.hpp"
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -233,7 +233,7 @@ static Stats run(Vcore& dut, const std::vector<Problem>& problems,
 }
 int main(int argc, char** argv) {
     try {
-        require(argc == 3 || argc == 4, "Usage: core_benchmark DATASET RESULTS.csv [LIMIT]");
+        require(argc == 3 || argc == 4, "Usage: core_test DATASET RESULTS.csv [LIMIT]");
         auto problems = load_dataset(argv[1], argc == 4 ? std::stoul(argv[3]) : 0);
         std::ofstream csv(argv[2]);
         require(bool(csv), "Cannot open CSV");

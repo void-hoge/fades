@@ -1,5 +1,6 @@
 `timescale 1ns/1ps
-// Little-endian 64-byte records; see docs/protocol.md.
+// Little-endian 64-byte records. Input: ID[63:0], cells[387:64].
+// Output: ID[63:0], status[71:64] (0 solved / 1 unsat / 2 invalid), cells[395:72].
 module solver_stream #(
     parameter integer CORES = 6,
     parameter integer INFLIGHT_LIMIT = 2,

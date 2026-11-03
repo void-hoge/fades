@@ -1,5 +1,7 @@
 `timescale 1ns/1ps
-// Verilog boundary required by Vivado IP Integrator module references.
+// IP Integrator connection boundary for solver_axi.
+// This SystemVerilog file uses the Verilog subset: Vivado 2024.2 module
+// references require FILE_TYPE=Verilog for the boundary file (set by build.tcl).
 module fades_kv260 (
     (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis:m_axis, ASSOCIATED_RESET aresetn" *)
     input wire dma_clk,

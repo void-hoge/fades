@@ -2,7 +2,7 @@
 // outside RUN. Timed rounds check DMA completion and coherent PL snapshots;
 // full content validation is deliberately outside the timed window.
 #include "fades_ioctl.h"
-#include "reference_solver.hpp"
+#include "sudoku.hpp"
 #include <algorithm>
 #include <array>
 #include <bit>

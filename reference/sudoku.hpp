@@ -6,7 +6,8 @@
 #include <string>
 #include <string_view>
 
-// Independent CPU oracle. Sequential propagation, rather than RTL's parallel
+// Shared CPU reference for host verification and RTL tests. Not an FPGA model.
+// Sequential propagation, rather than RTL's parallel
 // step semantics. Every recursive call owns its board (no undo bookkeeping).
 namespace reference {
 using Mask = uint16_t;

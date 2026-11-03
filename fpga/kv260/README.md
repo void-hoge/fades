@@ -15,8 +15,24 @@ Linux モジュールは **`fades.ko`**。現行構成は 6 コア / 100 MHz、D
 - ファンは **PS TTC0 wave[2] → EMIO → fan_en_b → A12**。
   LVCMOS33、drive 4 mA、slew SLOW。Linux の PWM 設定が実端子へ届く配線を含む。
 
-ストリーム仕様とレジスター配置は [protocol](../../docs/protocol.md)、
-処理系は [architecture](../../docs/architecture.md) を参照。
+## このディレクトリのファイル
+
+|ファイル|用途 / 使われる場所|
+|---|---|
+|`build.tcl`|`make vivado-kv260` の入口。回路生成から実装・検査・firmware出力まで|
+|`export.tcl`|`build.tcl`から呼ばれる。実装済み回路の検査とfirmware/XSA出力|
+|`build_core.tcl`|`make vivado-core`。KV260上の単一コアOOC評価|
+|`fades_kv260.sv`|IP Integratorと`rtl/solver_axi.sv`を接続する薄いラッパー|
+|`overlay.dts`|LinuxにDMA・IRQ・クロック・制御レジスターを教えるDevice Tree|
+|`shell.json`|`xmutil`がFPGAアプリを認識するための定義|
+
+`constraints/` の `fan.xdc` はファン端子、`solver_cdc.xdc` はクロック境界の
+タイミング制約、`core_ooc.xdc` は開発用の単一コア評価に使用する。
+CDCの保持バス・固定設定・resetに対するレビュー根拠は`export.tcl`内の出力検査に記載する。
+
+Vivado 2024.2のmodule-referenceはSystemVerilog型の入口を受け付けないため、
+Verilog互換構文だけの`fades_kv260.sv`に限り、生成時の`FILE_TYPE`をVerilogに指定する。
+下位の推論・探索・供給回路はSystemVerilogとして扱う。
 
 ## 開発機で生成
 
@@ -61,8 +77,8 @@ build/kv260/
 BOARD=root@kv260
 ssh "$BOARD" 'ls /root/fades'
 ssh "$BOARD" 'mkdir -p /root/fades/solver/sim /root/fades/solver/firmware'
-scp -r host "$BOARD":/root/fades/solver/
-scp -r sim/cpp sim/data "$BOARD":/root/fades/solver/sim/
+scp -r host reference "$BOARD":/root/fades/solver/
+scp -r sim/data "$BOARD":/root/fades/solver/sim/
 scp build/kv260/firmware/fades/* "$BOARD":/root/fades/solver/firmware/
 ssh "$BOARD" 'make -C /root/fades/solver/host tools module'
 ```
@@ -84,10 +100,11 @@ xmutil listapps
 insmod /root/fades/solver/build/host/driver/fades.ko
 ls -l /dev/fades
 python3 /root/fades/solver/host/tests/check_abi.py
-/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/17clues.txt 1 1 1
-/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/17clues.txt 1024 3 1 mixed
-/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/17clues.txt 8193 6 1
-/root/fades/solver/build/host/fades_benchmark /root/fades/solver/sim/data/17clues.txt 10
+/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/17puz49158.txt 1 1 1
+/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/17puz49158.txt 1024 3 1 mixed
+/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/17puz49158.txt 8193 6 1
+/root/fades/solver/build/host/fades_verify /root/fades/solver/sim/data/HardestDatabase110626.txt 375 1 1
+/root/fades/solver/build/host/fades_benchmark /root/fades/solver/sim/data/17puz49158.txt 10
 ```
 
 `xmutil` の終了値に加え、listapps、デバイスの存在、機能試験でロードを確認する。
@@ -97,4 +114,17 @@ python3 /root/fades/solver/host/tests/check_abi.py
 全 round を排出し、次の round の開始時に全体 reset を実施する。
 
 測定結果には回路・クロック・転送サイズ・計測範囲を添えて保存する。
-公開用の測定要約は [measurements](../../docs/measurements.md) を参照。
+
+## 制御レジスター
+
+|offset|意味|
+|---|---|
+|0x000|bit0 reset（初期値1）、bit1 enable|
+|0x004 / 0x008|総レコード件数 / 出力packet件数。reset中に設定|
+|0x00c|bit0 sticky framing error、bit1 snapshot pending|
+|0x010|bit0=1書き込みでcounter snapshotを要求|
+|0x014|identity `0x46414401`|
+|0x100〜0x25f|44個の64-bit counter、下位32bitが先|
+
+counter順は `host/include/fades_ioctl.h` のコメントを参照。
+クロックの異なるcounterはhandshakeで保持・採取し、全件排出後に件数を照合する。

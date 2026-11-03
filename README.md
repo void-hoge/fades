@@ -7,89 +7,74 @@ PS の Linux プログラムから DDR / AXI DMA 経由で問題を投入し、I
 現行の実機構成は **6 コア × 100 MHz、DMA 200 MHz**。
 最初の解を返し、解なしも結果を 1 件返す。問題の一意性を証明する処理ではない。
 
-## 構成
+## 1. 実機を使う
+
+FPGA アプリとドライバーをロード済みの KV260 上で実行する。
+提供する入口は、時間指定の性能測定と、件数指定の正当性確認の2つ。
+
+```sh
+make host                                          # KV260上でPSプログラムをビルド
+build/host/fades_benchmark sim/data/17puz49158.txt 10     # 10秒の性能測定
+build/host/fades_verify sim/data/17puz49158.txt 8193 6 1  # 全49,158問の解を照合
+build/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1  # 難問375問
+```
 
 ```text
-rtl/
-  inference.sv        候補解析・推論・完成/矛盾判定
-  branch.sv           分岐セル選択・候補の二分
-  core.sv             単一コアの探索・BRAM 状態列
-  async_fifo.sv       XPM 非同期 FIFO とシミュレーションモデル
-  solver_stream.sv    入出力変換・配布・ID 管理・結果回収・コア群
-  solver_axi.sv       AXI-Lite 制御・カウンター snapshot
-fpga/
-  kv260/              実機ラッパー・overlay・FPGA アプリ定義・操作手順
-  constraints/        OOC・CDC・ファン端子の制約
-  scripts/            Vivado ビルドとレポート出力
-host/
-  include/            ユーザー空間 / カーネル共通 ioctl ABI
-  driver/             Linux DMAengine クライアント
-  tools/              解照合ベンチマーク・時間指定ストレステスト
-  tests/              実機 ABI 試験・小規模入力
-sim/                  RTL/CPU テスト・形式検証・参照ソルバー・入力データ
-docs/                 回路構成・プロトコル・検証手順・測定結果
+問題ファイル → PSプログラム → /dev/fades → fades.ko → DMA → FPGAのソルバー群
+                     ↑                 結果はDDRへDMAで返す ───────────┘
 ```
 
-`build/` は生成物、`results/` はローカルの生ログ・実験履歴。
-公開する構成説明と測定要約は `docs/` に置く。
+入力は **1行81文字、空欄 `.`、ヒント `1〜9`、セル間の空白なし**。LF/CRLF に対応。
+プログラムは計測前後に独立 CPU 参照を使って検証する。
+通常の「問題ファイルを解ファイルへ変換する」コマンドは、現在の提供物には含まない。
+引数・データ形式・検証範囲は [host/README.md](host/README.md)。
 
-## ビルドと検証
+## 2. 実機を準備する
 
-必要ツール: GNU Make、Python 3、C++20、Icarus Verilog、Verilator、Yosys。
-ボード回路の生成には Vivado 2024.2 と K26 デバイスサポート、overlay には `dtc` を使う。
+開発機で回路を生成し、KV260 上で PS プログラムとドライバーをビルドしてロードする。
 
 ```sh
-make test                        # 推論・分岐・CPU 参照・AXI-Lite の機能試験
-make lint                        # core / stream / AXI-Lite / ボードラッパー
-make synth                       # 単一コアの RAM 構造・ラッチ不在を確認
-make formal                      # 推論・分岐・変化検出の等価性証明
-make reference-full              # 49,158 問の解の存在・一意性を CPU で確認
-make core-test JOBS=4             # 単一コア全問・ストレス試験
-make stream-test JOBS=4           # コア群・非同期入出力・ID・解なし・リセット
-make fifo-test                   # Vivado xsim で実際の XPM FIFO を試験
-make host                        # このマシン向けの PS ツールを生成
-make public-check                # Git公開対象だけのコピーでビルドと文書リンクを確認
+# 開発機: Vivado 2024.2 + K26サポート、dtc
+make vivado-kv260 JOBS=2
+make package-kv260
 ```
+
+生成物は `build/kv260/firmware/fades/`。KV260 で `xmutil loadapp fades` と
+`insmod fades.ko` を実行すると **`/dev/fades`** が使える。
+転送・Arm64 ビルド・ロードの手順と、各ボード用ファイルの役割は
+[fpga/kv260/README.md](fpga/kv260/README.md) にまとめる。
+
+## 3. 開発・検証する
 
 ```sh
-make vivado-core PERIOD=9.090909  # 単一コア OOC、110 MHz 目標
-make vivado-kv260 JOBS=2          # PS/DMA/コア群を含む実機用回路
-make package-kv260               # build/kv260/firmware/fades/ にパッケージ
+make test lint            # 推論・分岐・CPU参照・AXI-Liteの基本試験
+make core-test            # 単一コアの全問・ストレス試験
+make stream-test          # コア群・非同期入出力・ID対応の全体試験
 ```
 
-OOC と実機ロード用回路は別ターゲット。実機のコア周波数は 100 MHz であり、
-単一コア OOC の 110 MHz とは区別する。
-実機への転送・Arm64 ビルド・ロードは [KV260 手順](fpga/kv260/README.md) を参照。
+形式検証、XPM FIFO、回帰比較、単一コアの面積・タイミング評価は
+[sim/README.md](sim/README.md)。必要ツールは GNU Make、C++20、Python 3、
+Icarus Verilog、Verilator、Yosys。コマンドの一覧は `make help`。
 
-## PS から使う
+## ソースを読む順序
 
-Linux デバイスは **`/dev/fades`**、モジュールと FPGA アプリの名前は **`fades`**。
-TX/RX 各 8 MiB の coherent DMA バッファを `mmap` し、`ioctl` で転送・完了待ちを行う。
-問題も結果も 64 byte。結果は回収順に届くため、64-bit request ID で対応付ける。
+|対象|読むファイル|役割|
+|---|---|---|
+|PS利用|`host/tools/fades_benchmark.cpp` / `fades_verify.cpp`|性能測定 / 解の照合|
+|Linux接続|`host/include/fades_ioctl.h` → `host/driver/fades.c`|公開ABI → バッファ・DMA・制御|
+|ボード生成|`fpga/kv260/build.tcl`|PS・DMA・クロックの接続、実装、出力検査|
+|PLの入口|`rtl/solver_axi.sv` → `solver_stream.sv`|制御 → 供給・ID管理・結果回収・コア群|
+|探索|`rtl/core.sv` → `inference.sv` / `branch.sv`|状態列・探索 → 推論 / 分岐|
+|クロック境界|`rtl/async_fifo.sv`|XPM非同期FIFOと試験用モデル|
+|CPU照合|`reference/sudoku.hpp`|PSツールとRTL試験が共有する独立参照ソルバー|
 
-ボード上での例:
-
-```sh
-build/host/fades_verify sim/data/17clues.txt 8193 6 1  # 全49,158問の解を照合
-build/host/fades_benchmark sim/data/17clues.txt 10     # 10秒の性能測定
-python3 host/tests/check_abi.py
-```
-
-[PS ソフトウェア](host/README.md) に引数・検証範囲・計測時間の定義を記載する。
-入力テキストは **1 行 81 文字、空欄 `.`、ヒント `1〜9`、セル間の空白なし**。
-LF / CRLF に対応し、空行は読み飛ばす。同梱ファイルは BinarySudoku の
-`17puz49158.txt` と同じ内容・改行を使用する。
+`build/` は生成物、`results/` は生ログ・実験履歴、`docs/` はローカル設計メモ。
 
 ## 実測
 
 KV260 実機で 17 ヒント 49,158 問と Hard 1106 の 375 問を CPU 参照解と照合済み。
 準備済み DDR の 10 秒ストレス測定では、17 ヒント集合 **22.34 Mproblem/s**、
 Hard 1106 **0.7032 Mproblem/s**。入力準備と前後の全解検証は計測外。
-条件・資源量・タイミング・検証範囲は [測定結果](docs/measurements.md) を参照。
-
-## 詳細
-
-- [回路構成とコア設計](docs/architecture.md)
-- [ストリーム・AXI-Lite・Linux ABI](docs/protocol.md)
-- [検証手順](docs/verification.md)
-- [入力データの出所と形式](sim/data/README.md)
+6コア100 MHz / DMA 200 MHz、131,072件を反復する条件で、件数は延べ投入数。
+計測中は DMA 完了・PL件数を検査し、前後のバッチを全件検証する。
+入力データの出所は [sim/data/README.md](sim/data/README.md)。

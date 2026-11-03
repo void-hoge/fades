@@ -1,8 +1,10 @@
 # Full KV260 board design, independent of the solver OOC flow.
 # Arguments: output directory, stage (bd/synth/bit/export), parallel jobs.
 set root [file normalize [file dirname [info script]]/../..]
+
+source [file join [file dirname [info script]] export.tcl]
+
 set design_name fades
-set app_name fades
 set out [file normalize [expr {$argc > 0 ? [lindex $argv 0] : "$root/build/kv260"}]]
 set stage [expr {$argc > 1 ? [lindex $argv 1] : "bit"}]
 set jobs [expr {$argc > 2 ? [lindex $argv 2] : 4}]
@@ -13,7 +15,7 @@ set_param board.repoPaths [list $boards]
 set_param general.maxThreads $jobs
 file mkdir $out
 if {$stage eq "export"} {
-    source $root/fpga/scripts/vivado_kv260_export.tcl
+    export_firmware $root $out
     exit
 }
 file delete -force $out/build_complete
@@ -22,9 +24,12 @@ set_property board_part xilinx.com:kv260_som:part0:1.4 [current_project]
 set_property XPM_LIBRARIES {XPM_CDC XPM_MEMORY XPM_FIFO} [current_project]
 add_files [list $root/rtl/inference.sv $root/rtl/branch.sv $root/rtl/core.sv \
     $root/rtl/async_fifo.sv $root/rtl/solver_stream.sv $root/rtl/solver_axi.sv \
-    $root/fpga/kv260/fades_kv260.v]
+    $root/fpga/kv260/fades_kv260.sv]
+# IPI 2024.2 does not accept a SystemVerilog-typed module-reference boundary.
+# This thin .sv wrapper uses only the Verilog subset; the solver RTL stays SV.
+set_property FILE_TYPE Verilog [get_files fades_kv260.sv]
 update_compile_order -fileset sources_1
-add_files -fileset constrs_1 $root/fpga/constraints/solver_cdc.xdc
+add_files -fileset constrs_1 $root/fpga/kv260/constraints/solver_cdc.xdc
 set_property USED_IN_SYNTHESIS false [get_files solver_cdc.xdc]
 set_property PROCESSING_ORDER LATE [get_files solver_cdc.xdc]
 create_bd_design system
@@ -60,7 +65,7 @@ set_property -dict [list CONFIG.DIN_WIDTH {3} CONFIG.DIN_FROM {2} \
     CONFIG.DIN_TO {2} CONFIG.DOUT_WIDTH {1}] [get_bd_cells fan_pwm]
 connect_bd_net [get_bd_pins ps/emio_ttc0_wave_o] [get_bd_pins fan_pwm/Din]
 connect_bd_net [get_bd_pins fan_pwm/Dout] [get_bd_ports fan_en_b]
-read_xdc $root/fpga/constraints/kv260_fan.xdc
+read_xdc $root/fpga/kv260/constraints/fan.xdc
 
 create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 dma
 set_property -dict [list \
@@ -162,4 +167,4 @@ set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
 launch_runs impl_1 -to_step write_bitstream -jobs $jobs
 wait_on_run impl_1
 if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} { error "Implementation failed" }
-source $root/fpga/scripts/vivado_kv260_export.tcl
+export_firmware $root $out

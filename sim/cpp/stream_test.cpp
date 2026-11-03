@@ -1,6 +1,6 @@
 #include "Vsolver_stream.h"
 #include "verilated.h"
-#include "reference_solver.hpp"
+#include "sudoku.hpp"
 #include <array>
 #include <bit>
 #include <fstream>
@@ -113,7 +113,7 @@ static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool st
 }
 int main(int argc,char** argv) try {
     Verilated::commandArgs(argc,argv);
-    std::ifstream f(argc>1?argv[1]:"sim/data/17clues.txt");
+    std::ifstream f(argc>1?argv[1]:"sim/data/17puz49158.txt");
     check(bool(f),"Dataset unavailable");
     unsigned limit=argc>2?std::stoul(argv[2]):0;
     std::vector<Problem> ps;

@@ -1,6 +1,6 @@
 # Synchronous PL-facing interfaces. External interface timing is a property of
 # the eventual PS/DMA wrapper, and is excluded from this isolated core run.
-# Default for standalone use. vivado_core.tcl generates a copy with the requested
+# Default for standalone use. build_core.tcl generates a copy with the requested
 # numeric period before synthesis (XDC accepts only a restricted Tcl subset).
 create_clock -name core_clk -period 10.0 [get_ports clk]
 # Model a parent-design global clock buffer for OOC clock delay/skew analysis.

@@ -13,7 +13,7 @@ PS は問題の選択・反復と入出力バッファを管理し、PL はス�
 - `tests/check_input.py`: 両ツールの Usage と不正な問題テキストの拒否試験。
 - `tests/data/stress_mixed.txt`: 完成済み問題と矛盾する問題の小規模入力。
 
-ホストの検証は `sim/cpp/reference_solver.hpp` の独立 CPU ソルバーを共有する。
+ホストの検証は `reference/sudoku.hpp` の独立 CPU ソルバーを RTL 試験と共有する。
 外部ソルバーの実行・ビルドは不要。
 
 ## ビルド
@@ -56,20 +56,37 @@ packet 長を設定する。連続 SG リングを途切れなく補充する実
 異常時は両チャネルを停止し、ドライバーを faulted にする。
 タイムアウト等の後はアプリとモジュールを再ロードしてから再開する。
 
+公開ABIは `include/fades_ioctl.h`。INFOはバッファ構成、RUNは転送・完了待ち、STATSは
+counter snapshotを扱う。DMAの問題・結果レコードはリトルエンディアンの64 byte。
+
+|フィールド|入力bit|出力bit|
+|---|---|---|
+|request ID|63:0|63:0|
+|status|なし|71:64|
+|81セル x 4 bit|387:64|395:72|
+|予約|511:388|511:396|
+
+セルは行優先・先頭セルが下位nibble。入力の0は空欄、1〜9はヒント。
+statusは0=解あり、1=解なし、2=不正セル。解なし・不正セル時の出力セル列と予約領域はゼロ。
+入力予約領域はゼロで送信する。IDは未完了リクエスト間で一意にする。
+ストリームは128 bit x 4 beat/record、全TKEEP有効、出力TLASTは設定件数ごとのpacket末尾。
+
 ## 共通の問題テキスト形式
 
 1 行に **81 文字**を行優先で並べ、空欄は `.`、ヒントは `1〜9`。
 セル間・行頭・行末の空白は付けない。LF / CRLF の両方に対応し、空行は読み飛ばす。
 長さの異なる行や `0`・`-`・空白などの不正文字は拒否する。
 両プログラムとシミュレーションは共通の `reference::parse` で読み込む。
-同梱の `sim/data/17clues.txt` は BinarySudoku の `17puz49158.txt` をそのまま取り込んだもの。
+同梱データは BinarySudoku 原本の `sim/data/17puz49158.txt` と
+`sim/data/HardestDatabase110626.txt`。ファイル名・内容・改行をそのまま使用する。
 
 ## `fades_verify`
 
 ```sh
 build/host/fades_verify DATASET RECORDS_PER_PACKET SLOTS ROUNDS [mixed]
-build/host/fades_verify sim/data/17clues.txt 8193 6 1
-build/host/fades_verify sim/data/17clues.txt 1024 3 1 mixed
+build/host/fades_verify sim/data/17puz49158.txt 8193 6 1
+build/host/fades_verify sim/data/17puz49158.txt 1024 3 1 mixed
+build/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
 ```
 
 ファイルを巡回して各 slot に同数の問題を入れる。`8193 6` は 49,158 問を一巡する。
@@ -91,7 +108,7 @@ build/host/fades_verify sim/data/17clues.txt 1024 3 1 mixed
 
 ```sh
 build/host/fades_benchmark PUZZLE_FILE SECONDS
-build/host/fades_benchmark sim/data/17clues.txt 10
+build/host/fades_benchmark sim/data/17puz49158.txt 10
 ```
 
 引数は問題ファイルと実行時間だけ。秒数は有限の `0.001〜86400`、小数も指定可能。

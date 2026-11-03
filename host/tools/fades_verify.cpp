@@ -1,6 +1,6 @@
 // DMA buffers are coherent mappings; access only outside RUN ioctl.
 #include "fades_ioctl.h"
-#include "reference_solver.hpp"
+#include "sudoku.hpp"
 #include <array>
 #include <bit>
 #include <chrono>

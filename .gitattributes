@@ -1,2 +1,2 @@
-# Preserve the upstream puzzle file byte-for-byte, including CRLF line endings.
-sim/data/17clues.txt -text whitespace=cr-at-eol
+# Preserve the upstream puzzle files byte-for-byte, including CRLF line endings.
+sim/data/*.txt -text whitespace=cr-at-eol
