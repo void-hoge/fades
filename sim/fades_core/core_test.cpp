@@ -1,8 +1,14 @@
 // Black-box, cycle-accurate RTL testbench. No access to internal RAM is used:
-// the half-full starting state is built exclusively through ready/valid input.
+// the prefilled starting state is built exclusively through ready/valid input.
 #include "Vfades_core.h"
 #include "verilated.h"
 #include "sudoku.hpp"
+#ifndef FADES_SEGMENT_RULES
+#define FADES_SEGMENT_RULES 0
+#endif
+#if FADES_SEGMENT_RULES != 0
+#include "../segment_rules/segment_model.hpp"
+#endif
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -18,7 +24,7 @@ using State = VlWide<23>;
 // Match core's fixed depth. The prefill goes through its public
 // input interface and the assertions below verify the configured capacity.
 static constexpr unsigned deque_depth = 1024;
-static constexpr unsigned prefill = deque_depth / 2;
+static unsigned prefill = deque_depth / 2;
 static void require(bool value, const std::string& why) {
     if (!value) throw std::runtime_error(why);
 }
@@ -77,7 +83,8 @@ static std::vector<Problem> load_dataset(const char* path, unsigned limit) {
         validate(p, p.answer);
         problems.push_back(p);
     }
-    require(problems.size() >= prefill, "Half-full test needs at least 512 puzzles");
+    require(!problems.empty(), "Empty dataset");
+    prefill = std::min(prefill, unsigned(problems.size()));
     return problems;
 }
 struct Stats {
@@ -115,14 +122,14 @@ static uint32_t random_word(uint32_t& x) {
 static Stats run(Vfades_core& dut, const std::vector<Problem>& problems,
                  const std::string& name, bool stress, std::ofstream& csv) {
     reset(dut);
-    // Fill exactly half of the deque before enabling inference.
+    // Fill half of the deque (or the whole smaller dataset) before inference.
     for (unsigned i = 0; i < prefill; ++i) {
         dut.input_valid = 1; dut.input_candidates = problems[i].input; dut.eval();
         require(dut.input_ready, "Unexpected prefill backpressure");
         tick(dut);
     }
     dut.input_valid = 0;
-    require(dut.queued == prefill && !dut.busy, "Incorrect half-full starting state");
+    require(dut.queued == prefill && !dut.busy, "Incorrect prefilled starting state");
     std::cout << name << ": prefill=" << dut.queued << '/' << deque_depth << '\n';
     uint64_t accepted = prefill, returned = 0, finished = 0, previous_finish = 0;
     uint64_t previous_branches = 0, previous_infer = 0, previous_contradictions = 0;
@@ -257,6 +264,37 @@ int main(int argc, char** argv) {
         hall.input = uniform(511); hall.solvable = false; hall.exact = false;
         hall.name = "unsat_requires_search";
         for (unsigned i = 0; i < 9; ++i) set_mask(hall.input, i, i < 3 ? 3 : 508);
+#if FADES_SEGMENT_RULES != 0
+        hall.name = "segment_cardinality_unsat";
+        Problem search_unsat;
+        bool found = false;
+        for (unsigned p = 0; p < std::min(std::size_t(256), problems.size()) && !found; ++p) {
+            for (unsigned c = 0; c < 81 && !found; ++c) {
+                if (mask_at(problems[p].input,c) != 511) continue;
+                for (unsigned d = 0; d < 9 && !found; ++d) {
+                    if (mask_at(problems[p].answer,c) == (1u << d)) continue;
+                    reference::Board board;
+                    for (unsigned i = 0; i < 81; ++i) board[i] = mask_at(problems[p].input,i);
+                    board[c] = 1u << d;
+                    auto partial = board;
+                    bool stalled = false;
+                    for (unsigned round = 0; round < 730; ++round) {
+                        auto next = segment_model::step(partial,segment_model::Mode::triples);
+                        if (next.contradiction || next.segment_conflict || next.forced_conflict || next.solved) break;
+                        if (next.next == partial) { stalled = true; break; }
+                        partial = next.next;
+                    }
+                    if (!stalled || reference::solve(board).solutions) continue;
+                    search_unsat = problems[p];
+                    search_unsat.name = "unsat_requires_search";
+                    search_unsat.solvable = false; search_unsat.exact = false;
+                    set_mask(search_unsat.input,c,1u << d);
+                    found = true;
+                }
+            }
+        }
+        require(found, "No search-unsatisfiable case found for segment rules");
+#endif
         Problem forced;
         forced.input = uniform(511); forced.solvable = false; forced.exact = false;
         forced.name = "forced_conflict_metadata";
@@ -273,6 +311,9 @@ int main(int argc, char** argv) {
                 case 2: directed.push_back(duplicate); break;
                 case 3: directed.push_back(hall); break;
                 case 4: directed.push_back(forced); break;
+#if FADES_SEGMENT_RULES != 0
+                case 5: directed.push_back(search_unsat); break;
+#endif
                 default: directed.push_back(i%2 ? completed : problems[i%problems.size()]);
             }
         }

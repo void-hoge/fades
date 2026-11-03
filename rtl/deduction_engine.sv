@@ -2,7 +2,9 @@
 // Inference engine: every rule and validation read the same current state.
 // The core registers the successor and metadata; validation is NOT cascaded
 // after inference. Helpers below are local building blocks of this engine.
-module deduction_engine (
+// SEGMENT_RULES is an opt-in fixed-segment experiment: 0=baseline, 1=local
+// three-cell Hall contradiction, 2=also remove fixed-segment naked triples.
+module deduction_engine #(parameter integer SEGMENT_RULES = 0) (
     input wire [728:0] candidates_in,
     output wire [728:0] candidates_out,
     output wire solved,
@@ -12,10 +14,14 @@ module deduction_engine (
 );
     wire [728:0] fixed_digits;
     wire [242:0] unit_used, unit_unique;
+    wire cell_solved, cell_contradiction, segment_contradiction;
     analysis analyze(candidates_in, fixed_digits, unit_used, unit_unique,
-        solved, contradiction);
-    inference_rules rules(candidates_in, fixed_digits, unit_used, unit_unique,
-        candidates_out, forced_conflict);
+        cell_solved, cell_contradiction);
+    inference_rules #(.SEGMENT_RULES(SEGMENT_RULES)) rules(
+        candidates_in, fixed_digits, unit_used, unit_unique,
+        candidates_out, forced_conflict, segment_contradiction);
+    assign contradiction = cell_contradiction || segment_contradiction;
+    assign solved = cell_solved && !segment_contradiction;
     genvar row;
     generate for (row = 0; row < 9; row = row + 1) begin : changes
         assign row_changed[row] = candidates_in[81*row +: 81] !=
@@ -25,13 +31,14 @@ endmodule
 
 // Singles and locked candidates, consuming the shared analysis.
 /* verilator lint_off DECLFILENAME */
-module inference_rules (
+module inference_rules #(parameter integer SEGMENT_RULES = 0) (
     input wire [728:0] candidates_in,
     input wire [728:0] fixed_digits,
     input wire [242:0] unit_used,
     input wire [242:0] unit_unique,
     output wire [728:0] candidates_out,
-    output wire forced_conflict
+    output wire forced_conflict,
+    output wire segment_contradiction
 );
     wire [8:0] candidates [0:80];
     wire [8:0] row_used [0:8], col_used [0:8], box_used [0:8];
@@ -40,11 +47,22 @@ module inference_rules (
     wire [8:0] row_pointing [0:26], col_pointing [0:26];
     wire [8:0] row_claiming [0:26], col_claiming [0:26];
     wire [8:0] row_locked [0:26], col_locked [0:26];
+    wire [8:0] row_triple [0:26], col_triple [0:26];
+    wire [8:0] row_extra [0:26], col_extra [0:26];
+    wire [53:0] bad_segment;
     wire [80:0] bad_forced;
     function single;
         input [8:0] bits;
         begin
             single = (bits != 0) && ((bits & (bits - 9'd1)) == 0);
+        end
+    endfunction
+    function [3:0] count9;
+        input [8:0] bits;
+        integer d;
+        begin
+            count9 = 0;
+            for (d = 0; d < 9; d = d + 1) count9 = count9 + {3'b0, bits[d]};
         end
     endfunction
     genvar u, s, i;
@@ -63,6 +81,29 @@ module inference_rules (
                     candidates[u*9+s*3+1] | candidates[u*9+s*3+2];
                 assign col_segment[u*3+s] = candidates[s*27+u] |
                     candidates[s*27+9+u] | candidates[s*27+18+u];
+                if (SEGMENT_RULES != 0) begin : segment_rules
+                    wire [3:0] row_count = count9(row_segment[u*3+s]);
+                    wire [3:0] col_count = count9(col_segment[u*3+s]);
+                    assign bad_segment[u*3+s] = row_count < 3;
+                    assign bad_segment[27+u*3+s] = col_count < 3;
+                    assign row_triple[u*3+s] = (SEGMENT_RULES == 2 && row_count == 3) ?
+                        row_segment[u*3+s] : 9'b0;
+                    assign col_triple[u*3+s] = (SEGMENT_RULES == 2 && col_count == 3) ?
+                        col_segment[u*3+s] : 9'b0;
+                end else begin : baseline
+                    assign bad_segment[u*3+s] = 0;
+                    assign bad_segment[27+u*3+s] = 0;
+                    assign row_triple[u*3+s] = 0;
+                    assign col_triple[u*3+s] = 0;
+                end
+                // The three digits occupy the source segment in both its
+                // line and box. Reuse the existing fixed segment topology.
+                assign row_extra[u*3+s] = row_triple[u*3+(s+1)%3] |
+                    row_triple[u*3+(s+2)%3] |
+                    row_triple[OTHER1*3+s] | row_triple[OTHER2*3+s];
+                assign col_extra[u*3+s] = col_triple[u*3+(s+1)%3] |
+                    col_triple[u*3+(s+2)%3] |
+                    col_triple[OTHER1*3+s] | col_triple[OTHER2*3+s];
                 assign row_pointing[u*3+s] = row_segment[u*3+s] &
                     ~(row_segment[OTHER1*3+s] | row_segment[OTHER2*3+s]);
                 assign col_pointing[u*3+s] = col_segment[u*3+s] &
@@ -90,7 +131,8 @@ module inference_rules (
             assign candidates[i] = candidates_in[9*i +: 9];
             assign peer_digits = (row_used[R] | col_used[C] | box_used[B]) & ~fixed_digits[9*i +: 9];
             assign removed = peer_digits |
-                row_locked[R*3+C/3] | col_locked[C*3+R/3];
+                row_locked[R*3+C/3] | col_locked[C*3+R/3] |
+                row_extra[R*3+C/3] | col_extra[C*3+R/3];
             assign forced = candidates[i] & (row_unique[R] | col_unique[C] | box_unique[B]);
             assign candidates_out[9*i +: 9] = candidates[i] & ~removed &
                 ((forced != 0) ? forced : 9'h1ff);
@@ -98,6 +140,7 @@ module inference_rules (
         end
     endgenerate
     assign forced_conflict = |bad_forced;
+    assign segment_contradiction = |bad_segment;
 endmodule
 
 // Shared candidate/fixed-digit occurrence analysis. Unit order is rows,

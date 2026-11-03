@@ -99,6 +99,7 @@ ctest --preset host                         # 全試験（ホスト入力試験�
 ctest --preset host -L '^fades_core$'        # コア単体：全問題集・ストレス・構造合成・lint
 ctest --preset host -L '^fades$'             # 指定コア数で供給・回収を含む統合試験・lint
 ctest --preset host -L '^deduction_engine$'  # 推論の有向試験・形式検証
+ctest --preset host -L '^segment_rules$'     # 固定3セル規則のモデル・RTL比較（実験）
 ctest --preset host -L '^async_queue$'       # 実装に使うXPM非同期FIFOの試験
 ```
 
@@ -125,6 +126,11 @@ ctest --preset host -L '^async_queue$'
 試験の詳細と回帰比較は [sim/README.md](sim/README.md)。必要ツールは
 CMake 3.25以降、Ninja、C++20、Python 3、Icarus Verilog、Verilator、Yosys。
 XPM試験にはVivadoが必要。`kv260-ps` ではRTL検証ツール・Vivado・カーネルのクロスビルド環境は不要。
+
+固定3セルの局所矛盾検出・限定Naked Tripleは、既定で無効の実験オプションとして
+比較できる。`-DFADES_SEGMENT_RULES=2` でシミュレーションとPLビルドに有効化する。
+6コア100 MHz / DMA 200 MHzのボード配置配線も通過した。
+[評価結果](sim/segment_rules/README.md) にサイクル削減、資源、タイミングと最長パスを記載する。
 
 ### ビルド対象と出力の分離
 
@@ -186,3 +192,10 @@ KV260 実機で 17 ヒント 49,158 問と Hard 1106 の 375 問を CPU 参照�
 6コア100 MHz / DMA 200 MHz、131,072件を反復する条件で、件数は延べ投入数。
 計測中は DMA 完了・PL件数を検査し、前後のバッチを全件検証する。
 入力データの出所は [sim/README.md](sim/README.md#問題集)。
+
+限定Naked Tripleの実機A/B比較では、17ヒント集合が **22.3233 → 24.4033 Mproblem/s
+（+9.32%）**、Hard 1106が **0.703226 → 0.752190 Mproblem/s（+6.96%）**となった。
+10秒×3回の中央値、6コア・実クロックcore約100 MHz / DMA約187.5 MHzで両回路を再測定した値。
+配置配線目標のDMA 200 MHzとは区別する。新規則は既定では無効で、
+`-DFADES_SEGMENT_RULES=2` で有効化する。条件と各回の値は
+[固定3セル規則の評価](sim/segment_rules/README.md#kv260実機abベンチマーク2026-11-04-jst) を参照。

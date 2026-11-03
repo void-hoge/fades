@@ -1,6 +1,7 @@
 `timescale 1ns/1ps
 module tb_fades_axi;
     parameter integer CORES = 6;
+    parameter integer SEGMENT_RULES = 0;
     reg dma_clk=0, core_clk=0, aresetn=0;
     always #2.5 dma_clk=~dma_clk;
     always #5 core_clk=~core_clk;
@@ -10,7 +11,7 @@ module tb_fades_axi;
     reg awvalid=0,wvalid=0,bready=0,arvalid=0,rready=0;
     wire awready,wready,bvalid,arready,rvalid;
     wire [31:0] rdata;
-    fades_axi #(.CORES(CORES)) dut (
+    fades_axi #(.CORES(CORES), .SEGMENT_RULES(SEGMENT_RULES)) dut (
         .dma_clk(dma_clk),.core_clk(core_clk),.aresetn(aresetn),
         .s_axi_awaddr(awaddr),.s_axi_awprot(3'b0),.s_axi_awvalid(awvalid),.s_axi_awready(awready),
         .s_axi_wdata(wdata),.s_axi_wstrb(wstrb),.s_axi_wvalid(wvalid),.s_axi_wready(wready),

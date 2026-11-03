@@ -4,7 +4,8 @@
 module fades #(
     parameter integer CORES = 6,
     parameter integer INFLIGHT_LIMIT = 2,
-    parameter integer FIFO_DEPTH = 64
+    parameter integer FIFO_DEPTH = 64,
+    parameter integer SEGMENT_RULES = 0
 ) (
     input wire dma_clk, core_clk,
     /* verilator lint_off SYNCASYNCNET */
@@ -158,7 +159,7 @@ module fades #(
     end
     for (genvar g = 0; g < CORES; g = g+1) begin : solvers
         /* verilator lint_off PINCONNECTEMPTY */
-        fades_core solver (
+        fades_core #(.SEGMENT_RULES(SEGMENT_RULES)) solver (
             .clk(core_clk), .reset(core_reset), .enable(enable),
             .input_valid(core_valid[g]), .input_ready(core_ready[g]),
             .input_candidates(candidates), .result_valid(result_valid[g]),

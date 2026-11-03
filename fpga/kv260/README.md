@@ -81,6 +81,22 @@ build/kv260-pl/fpga/kv260/
     project/             Vivado プロジェクトと詳細 runme.log
 ```
 
+## 固定3セル規則の実験ビルド
+
+`-DFADES_SEGMENT_RULES=0`（既定）は従来方式、`1` は局所矛盾検出、
+`2` は限定Naked Tripleの候補除去も有効にする。シミュレーションとPLビルドに共通の設定で、
+ボードトップから各コアへ伝播する。出力先を分けて比較する。
+
+```sh
+cmake --preset kv260-pl -B build/segment-6core-pl \
+    -DFADES_CORES=6 -DFADES_SEGMENT_RULES=2 -DFADES_VIVADO_JOBS=2
+cmake --build build/segment-6core-pl --target kv260-bitstream
+```
+
+`fpga/kv260/configuration.txt` と `implementation/solver_configuration.txt` は
+選択したビルドディレクトリ内に生成する。評価の条件・結果は
+[固定3セル規則](../../sim/segment_rules/README.md) を参照。
+
 ## ソースと firmware を実機へ転送
 
 リポジトリのソースと `build/kv260-pl/fpga/kv260/firmware/fades/` の内容を、
@@ -135,6 +151,10 @@ build/kv260-ps/host/fades_benchmark sim/data/17puz49158.txt 10
 全 round を排出し、次の round の開始時に全体 reset を実施する。
 
 測定結果には回路・クロック・転送サイズ・計測範囲を添えて保存する。
+設定した周波数と実行時の周波数は区別し、`/sys/kernel/debug/clk/clk_summary` も確認する。
+固定3セル規則の今回の実機A/B測定では、coreは約100 MHz、DMAは設定目標200 MHzに対し
+約187.5 MHzで動作していた。両回路を同じ実クロックで比較した結果を
+[評価文書](../../sim/segment_rules/README.md) に記載する。
 
 ## 制御レジスター
 

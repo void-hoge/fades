@@ -3,8 +3,9 @@ find_program(DTC_EXECUTABLE NAMES dtc REQUIRED)
 set(FADES_VIVADO_JOBS 4 CACHE STRING "Vivado parallel jobs")
 set(out "${CMAKE_CURRENT_BINARY_DIR}")
 set(scripts "${CMAKE_CURRENT_SOURCE_DIR}/scripts")
-# Configured input invalidates every FPGA stage when the core count changes.
-file(CONFIGURE OUTPUT "${out}/configuration.txt" CONTENT "CORES=@FADES_CORES@\n" @ONLY)
+# Configured input invalidates every stage when the core or rule mode changes.
+file(CONFIGURE OUTPUT "${out}/configuration.txt"
+    CONTENT "CORES=@FADES_CORES@\nSEGMENT_RULES=@FADES_SEGMENT_RULES@\n" @ONLY)
 set(inputs ${FADES_AXI_RTL} "${CMAKE_CURRENT_SOURCE_DIR}/rtl/fades_kv260.sv"
     "${scripts}/build.tcl" "${scripts}/export.tcl"
     "${CMAKE_CURRENT_SOURCE_DIR}/constraints/fan.xdc"
@@ -26,7 +27,7 @@ foreach(stage IN ITEMS bd synth bit)
         COMMAND "${CMAKE_COMMAND}" -E rm -f "${stage_dir}/complete.stamp" "${stage_dir}/build_complete"
         COMMAND "${VIVADO_EXECUTABLE}" -mode batch -log "${stage_dir}/vivado.log"
             -journal "${stage_dir}/vivado.jou" -source "${scripts}/build.tcl"
-            -tclargs "${stage_dir}" ${stage} ${FADES_VIVADO_JOBS} ${FADES_CORES}
+            -tclargs "${stage_dir}" ${stage} ${FADES_VIVADO_JOBS} ${FADES_CORES} ${FADES_SEGMENT_RULES}
         COMMAND "${CMAKE_COMMAND}" -E touch "${stage_dir}/complete.stamp"
         DEPENDS ${inputs} WORKING_DIRECTORY "${out}" USES_TERMINAL VERBATIM)
     add_custom_target(${target} DEPENDS "${stage_dir}/complete.stamp")

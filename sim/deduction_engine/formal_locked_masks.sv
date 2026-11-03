@@ -86,10 +86,11 @@ module formal_locked_masks (
 );
     wire [728:0] actual, expected;
     wire actual_conflict, expected_conflict, expected_changed;
+    wire actual_segment_conflict;
     inference_rules dut(candidates_in, fixed_digits, unit_used, unit_unique,
-        actual, actual_conflict);
+        actual, actual_conflict, actual_segment_conflict);
     reference_inference_rules reference_rules(candidates_in, fixed_digits,
         unit_used, unit_unique, expected, expected_changed, expected_conflict);
     assign mismatch = (actual != expected) || (actual_conflict != expected_conflict) ||
-        ((actual != candidates_in) != expected_changed);
+        ((actual != candidates_in) != expected_changed) || actual_segment_conflict;
 endmodule

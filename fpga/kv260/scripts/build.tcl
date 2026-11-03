@@ -1,5 +1,5 @@
 # Full KV260 board design.
-# Arguments: output directory, stage (bd/synth/bit/export), parallel jobs, cores.
+# Arguments: output directory, stage (bd/synth/bit/export), jobs, cores, segment rules.
 set root [file normalize [file dirname [info script]]/../../..]
 
 source [file join [file dirname [info script]] export.tcl]
@@ -9,8 +9,12 @@ set out [file normalize [expr {$argc > 0 ? [lindex $argv 0] : "$root/build/kv260
 set stage [expr {$argc > 1 ? [lindex $argv 1] : "bit"}]
 set jobs [expr {$argc > 2 ? [lindex $argv 2] : 4}]
 set cores [expr {$argc > 3 ? [lindex $argv 3] : 6}]
+set segment_rules [expr {$argc > 4 ? [lindex $argv 4] : 0}]
 if {![string is integer -strict $cores] || $cores < 1 || $cores > 6} {
     error "Core count must be between 1 and 6"
+}
+if {![string is integer -strict $segment_rules] || $segment_rules < 0 || $segment_rules > 2} {
+    error "Segment rules must be 0 (baseline), 1 (contradiction) or 2 (naked triples)"
 }
 if {$stage ni {bd synth bit export}} { error "Stage must be bd, synth, bit or export" }
 set boards [file join $::env(XILINX_VIVADO) data xhub boards XilinxBoardStore boards Xilinx]
@@ -88,6 +92,13 @@ set_property -dict [list \
 
 create_bd_cell -type module -reference fades_kv260 solver
 set_property CONFIG.CORES $cores [get_bd_cells solver]
+set_property CONFIG.SEGMENT_RULES $segment_rules [get_bd_cells solver]
+set config_report [open $out/solver_configuration.txt w]
+puts $config_report "CORES=[get_property CONFIG.CORES [get_bd_cells solver]]"
+puts $config_report "SEGMENT_RULES=[get_property CONFIG.SEGMENT_RULES [get_bd_cells solver]]"
+puts $config_report "CORE_CLOCK_TARGET_MHZ=100"
+puts $config_report "DMA_CLOCK_TARGET_MHZ=200"
+close $config_report
 set_property CONFIG.FREQ_HZ [get_property CONFIG.FREQ_HZ [get_bd_pins ps/pl_clk0]] [get_bd_pins solver/dma_clk]
 set_property CONFIG.FREQ_HZ [get_property CONFIG.FREQ_HZ [get_bd_pins ps/pl_clk1]] [get_bd_pins solver/core_clk]
 connect_bd_net [get_bd_pins ps/pl_clk1] [get_bd_pins solver/core_clk]

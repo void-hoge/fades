@@ -15,6 +15,7 @@ cmake --build --preset host
 ctest --preset host
 ctest --preset host -L '^fades_core$'
 ctest --preset host -L '^fades$'
+ctest --preset host -L '^segment_rules$'
 ctest --preset host -L '^async_queue$'
 ```
 
@@ -37,6 +38,7 @@ ctest --preset host -L '^async_queue$'
 |----------------------|--------|----------------|
 | `deduction_engine` | `deduction-engine`、`formal-deduction-engine`、`formal-row-changes`、`formal-locked-masks` | Singles、Locked Candidates、推論ステップ、推論・行変化・共通マスクと独立仕様の等価性 |
 | `branch_generator` | `branch-generator`、`formal-branch-generator` | 候補分割の有向試験・独立逐次仕様との等価性 |
+| `segment_rules` | `segment-model-*`、`segment-core-*`、`lint-segment-core-*` | 固定3セルの局所矛盾・限定Naked Tripleの比較モデル、3モードのRTL照合・コア試験・lint |
 | `fades_core` | `fades-core`、`synth-core`、`lint-fades_core` | コア1個のCPU照合・探索・バックトラック・順序・停止・キュー周回・reset・サイクル集計、構造合成、lint |
 | `fades` | `fades`、`lint-fades` | `FADES_CORES` 個のコア群と供給・ID管理・回収・非同期キューの統合試験、lint |
 | `fades_axi` | `axi`、`lint-fades_axi`、`lint-fades_kv260` | AXI-LiteのAW/W独立受理・WSTRB・応答停止・設定保護・snapshot・未実装コアのカウンター0、AXI境界とボードラッパーのlint |
@@ -44,6 +46,9 @@ ctest --preset host -L '^async_queue$'
 | `reference` | `reference-dataset` | CPU参照実装・入力形式の基本試験と、全問題集の解の存在・一意性 |
 
 コア・統合・CPU参照試験は既定の全49,158問を使い、コア試験には追加4,096件のストレス入力がある。
+`fades-core-hard` は難問375問とストレス入力を検証する。小さい問題集では先行投入数を
+512件から問題数まで減らす。固定3セル規則の評価方法・結果は
+[segment_rules/README.md](segment_rules/README.md) を参照。
 `fades-core` のDUTは常に単一の `fades_core`。`fades` のDUTは既定6コアの `fades` 全体で、
 `FADES_CORES` でコア数を変更できる。AXI-Lite制御やPS・DMAを含むボード全体は含まない。
 統合試験は解なし・不正セル・満杯・出力停止・部分入力と未回収出力のresetも検証する。
