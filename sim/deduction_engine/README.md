@@ -1,5 +1,8 @@
 # セグメント共通解析への再構成：シミュレーション段階の結果
 
+Singlesのみの推論単体・探索込みサイクル測定、Kaggle 100万問と供給系の検討は
+[SINGLES_RESULTS.md](SINGLES_RESULTS.md) を参照。
+
 この文書は第1段階（機能等価な共通化）の記録。
 続く第2段階では、#9より強い固定領域Pair規則をモード3として追加した。
 結果と検証範囲は [Pair評価結果](../segment_rules/PAIR_RESULTS.md) を参照。

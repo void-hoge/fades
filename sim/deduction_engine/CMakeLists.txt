@@ -1,5 +1,31 @@
 set(rtl "${PROJECT_SOURCE_DIR}/rtl/deduction_engine.sv")
 fades_iverilog(deduction-engine tb_deduction_engine SOURCES "${rtl}" "${CMAKE_CURRENT_SOURCE_DIR}/tb_deduction_engine.sv")
+fades_iverilog(deduction-singles tb_singles SOURCES "${rtl}" "${CMAKE_CURRENT_SOURCE_DIR}/tb_singles.sv")
 fades_formal(formal-deduction-engine formal_deduction_engine "${rtl}" "${CMAKE_CURRENT_SOURCE_DIR}/formal_deduction_engine.sv")
 fades_formal(formal-row-changes formal_row_changes "${rtl}" "${CMAKE_CURRENT_SOURCE_DIR}/formal_deduction_engine.sv")
 fades_formal(formal-locked-masks formal_locked_masks "${rtl}" "${CMAKE_CURRENT_SOURCE_DIR}/formal_locked_masks.sv")
+
+# Explicit experiment targets: SEGMENT_RULES=0 in both arms, only locked
+# candidates differ. Build these on demand rather than in the default build.
+foreach(mode IN ITEMS singles locked)
+    if(mode STREQUAL "singles")
+        set(locked 0)
+    else()
+        set(locked 1)
+    endif()
+    foreach(scope IN ITEMS deduction core)
+        set(target "${scope}_bench_${mode}")
+        add_executable(${target} EXCLUDE_FROM_ALL cycle_benchmark.cpp)
+        if(scope STREQUAL "core")
+            target_compile_definitions(${target} PRIVATE CORE_BENCH)
+            set(top fades_core)
+            set(sources ${FADES_CORE_RTL})
+        else()
+            set(top deduction_engine)
+            set(sources "${rtl}")
+        endif()
+        verilate(${target} SOURCES ${sources} TOP_MODULE ${top} PREFIX V${top}
+            VERILATOR_ARGS --assert --language 1800-2017 -GSEGMENT_RULES=0
+            -GLOCKED_CANDIDATES=${locked} --output-split 20000 --output-split-cfuncs 200)
+    endforeach()
+endforeach()

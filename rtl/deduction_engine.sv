@@ -6,7 +6,8 @@
 // three-cell Hall contradiction, 2=also remove fixed-segment naked triples,
 // 3=also apply all two-cell Hall subsets inside each fixed segment,
 // 4=restrict pairs to two identical bivalue cells, sharing cell features.
-module deduction_engine #(parameter integer SEGMENT_RULES = 0) (
+module deduction_engine #(parameter integer SEGMENT_RULES = 0,
+    parameter integer LOCKED_CANDIDATES = 1) (
     input wire [728:0] candidates_in,
     output wire [728:0] candidates_out,
     output wire solved,
@@ -23,7 +24,7 @@ module deduction_engine #(parameter integer SEGMENT_RULES = 0) (
     analysis analyze(candidates_in, fixed_digits, unit_used, unit_unique,
         cell_solved, cell_contradiction, row_segments, col_segments, cell_two,
         row_multis, col_multis);
-    inference_rules #(.SEGMENT_RULES(SEGMENT_RULES)) rules(
+    inference_rules #(.SEGMENT_RULES(SEGMENT_RULES), .LOCKED_CANDIDATES(LOCKED_CANDIDATES)) rules(
         candidates_in, fixed_digits, unit_used, unit_unique,
         candidates_out, forced_conflict, segment_contradiction,
         row_segments, col_segments, cell_two, row_multis, col_multis);
@@ -38,7 +39,8 @@ endmodule
 
 // Singles and locked candidates, consuming the shared analysis.
 /* verilator lint_off DECLFILENAME */
-module inference_rules #(parameter integer SEGMENT_RULES = 0) (
+module inference_rules #(parameter integer SEGMENT_RULES = 0,
+    parameter integer LOCKED_CANDIDATES = 1) (
     input wire [728:0] candidates_in,
     input wire [728:0] fixed_digits,
     input wire [242:0] unit_used,
@@ -164,7 +166,7 @@ module inference_rules #(parameter integer SEGMENT_RULES = 0) (
             assign candidates[i] = candidates_in[9*i +: 9];
             assign peer_digits = (row_used[R] | col_used[C] | box_used[B]) & ~fixed_digits[9*i +: 9];
             assign removed = peer_digits |
-                row_locked[R*3+C/3] | col_locked[C*3+R/3] |
+                (LOCKED_CANDIDATES != 0 ? (row_locked[R*3+C/3] | col_locked[C*3+R/3]) : 9'b0) |
                 row_extra[R*3+C/3] | col_extra[C*3+R/3] |
                 row_pair_local[R*3+C/3][9*(C%3) +: 9] |
                 col_pair_local[C*3+R/3][9*(R%3) +: 9];
