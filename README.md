@@ -132,6 +132,14 @@ XPM試験にはVivadoが必要。`kv260-ps` ではRTL検証ツール・Vivado・
 6コア100 MHz / DMA 200 MHzのボード配置配線も通過した。
 [評価結果](sim/segment_rules/README.md) にサイクル削減、資源、タイミングと最長パスを記載する。
 
+`-DFADES_SEGMENT_RULES=3` は同じ固定領域内のPairも適用する実験モード。
+[Pair評価結果](sim/segment_rules/PAIR_RESULTS.md) はシミュレーション段階で、資源・タイミングは未評価。
+`-DFADES_SEGMENT_RULES=4` は2候補セルの特徴とセグメント重複情報を共有する軽量化候補。
+[論理構造と性能の比較](sim/segment_rules/PAIR_FACTORIZATION.md) に加え、
+[6コア・100 MHzの配置配線](sim/segment_rules/PAIR_IMPLEMENTATION.md) も通過した。
+[実機A/B測定](sim/segment_rules/PAIR_KV260_RESULTS.md) ではモード2比で
+17ヒント約2.46%、難問約1.15%のスループット改善を確認した。
+
 ### ビルド対象と出力の分離
 
 | プリセット | 実行場所 | 通常のbuildで生成するもの | 出力先 |

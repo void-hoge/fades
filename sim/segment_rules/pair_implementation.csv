@@ -1,0 +1,3 @@
+mode,cores,core_target_mhz,dma_target_mhz,solver_synth_luts,board_routed_luts,board_routed_ff,board_routed_clb,board_routed_bram_tiles,board_routed_carry8,wns_ns,core_wns_ns,dma_wns_ns,whs_ns,unreviewed_critical_cdc,snapshot_bus_skew_ns,bit_bin_sha256
+2,6,100,200,88303,97018,36268,14217,128,644,0.099,0.297,0.099,0.011,0,2.970,428393bf1c67347783b40be972f4571e2bb3f7da9e21538e7638a8fe6845f144
+4,6,100,200,96377,104840,36271,14419,128,644,0.066,0.116,0.066,0.010,0,2.276,813dd2451f90ccfc3b6d02aa2daf51eb38d7121a55e6f18e5e23792ed38e3716

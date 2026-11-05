@@ -279,7 +279,11 @@ int main(int argc, char** argv) {
                     auto partial = board;
                     bool stalled = false;
                     for (unsigned round = 0; round < 730; ++round) {
-                        auto next = segment_model::step(partial,segment_model::Mode::triples);
+                        // Preserve the original shared mode-1/2 fixture, but
+                        // require the pair-mode fixture to stall even with pairs.
+                        constexpr auto fixture_mode = FADES_SEGMENT_RULES >= 3 ?
+                            segment_model::Mode(FADES_SEGMENT_RULES) : segment_model::Mode::triples;
+                        auto next = segment_model::step(partial,fixture_mode);
                         if (next.contradiction || next.segment_conflict || next.forced_conflict || next.solved) break;
                         if (next.next == partial) { stalled = true; break; }
                         partial = next.next;

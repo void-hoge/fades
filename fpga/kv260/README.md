@@ -87,6 +87,11 @@ build/kv260-pl/fpga/kv260/
 `2` は限定Naked Tripleの候補除去も有効にする。シミュレーションとPLビルドに共通の設定で、
 ボードトップから各コアへ伝播する。出力先を分けて比較する。
 
+`3` は固定領域内の全2セル部分集合のPairも適用し、`4` は同じ2候補のセル対に限定して
+セル特徴・セグメント重複情報を共有する。モード4の
+[配置配線結果](../../sim/segment_rules/PAIR_IMPLEMENTATION.md) と
+[実機A/B測定](../../sim/segment_rules/PAIR_KV260_RESULTS.md) を参照。
+
 ```sh
 cmake --preset kv260-pl -B build/segment-6core-pl \
     -DFADES_CORES=6 -DFADES_SEGMENT_RULES=2 -DFADES_VIVADO_JOBS=2

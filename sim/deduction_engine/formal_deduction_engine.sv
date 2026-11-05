@@ -8,9 +8,14 @@ module formal_deduction_engine (
     wire [728:0] fixed_digits, expected_fixed;
     wire [242:0] unit_used, unit_unique, expected_used, expected_unique;
     wire solved, contradiction;
+    wire [242:0] row_segments, col_segments;
+    wire [242:0] expected_row_segments, expected_col_segments;
+    wire [242:0] row_multis, col_multis, expected_row_multis, expected_col_multis;
+    wire [80:0] cell_two, expected_two;
     wire [80:0] empty_cell, filled;
     wire [8:0] bad_unit;
-    analysis dut(candidates, fixed_digits, unit_used, unit_unique, solved, contradiction);
+    analysis dut(candidates, fixed_digits, unit_used, unit_unique, solved, contradiction,
+        row_segments, col_segments, cell_two, row_multis, col_multis);
     function single;
         input [8:0] bits;
         begin
@@ -23,6 +28,13 @@ module formal_deduction_engine (
             assign empty_cell[i] = candidates[9*i +: 9] == 0;
             assign filled[i] = single(candidates[9*i +: 9]);
             assign expected_fixed[9*i +: 9] = filled[i] ? candidates[9*i +: 9] : 9'b0;
+            reg [3:0] count;
+            integer d;
+            always @* begin
+                count = 0;
+                for (d = 0; d < 9; d = d + 1) count = count + {3'b0, candidates[9*i+d]};
+            end
+            assign expected_two[i] = count == 2;
         end
         for (u = 0; u < 9; u = u + 1) begin : units
             localparam integer BOX_START = (u/3)*27+(u%3)*3;
@@ -67,12 +79,31 @@ module formal_deduction_engine (
             assign bad_unit[u] = duplicate || (row_seen != 9'h1ff) ||
                 (col_seen != 9'h1ff) || (box_seen != 9'h1ff);
         end
+        for (i = 0; i < 27; i = i + 1) begin : segments
+            localparam integer R = (i/3)*9+(i%3)*3;
+            localparam integer C = (i%3)*27+i/3;
+            assign expected_row_segments[9*i +: 9] = candidates[9*R +: 9] |
+                candidates[9*(R+1) +: 9] | candidates[9*(R+2) +: 9];
+            assign expected_col_segments[9*i +: 9] = candidates[9*C +: 9] |
+                candidates[9*(C+9) +: 9] | candidates[9*(C+18) +: 9];
+            assign expected_row_multis[9*i +: 9] =
+                (candidates[9*R +: 9] & candidates[9*(R+1) +: 9]) |
+                (candidates[9*R +: 9] & candidates[9*(R+2) +: 9]) |
+                (candidates[9*(R+1) +: 9] & candidates[9*(R+2) +: 9]);
+            assign expected_col_multis[9*i +: 9] =
+                (candidates[9*C +: 9] & candidates[9*(C+9) +: 9]) |
+                (candidates[9*C +: 9] & candidates[9*(C+18) +: 9]) |
+                (candidates[9*(C+9) +: 9] & candidates[9*(C+18) +: 9]);
+        end
     endgenerate
     wire expected_bad = (|empty_cell) || (|bad_unit);
     wire expected_solved = (&filled) && !expected_bad;
     assign mismatch = (fixed_digits != expected_fixed) || (unit_used != expected_used) ||
         (unit_unique != expected_unique) || (contradiction != expected_bad) ||
-        (solved != expected_solved);
+        (solved != expected_solved) || (row_segments != expected_row_segments) ||
+        (col_segments != expected_col_segments) ||
+        (cell_two != expected_two) || (row_multis != expected_row_multis) ||
+        (col_multis != expected_col_multis);
 endmodule
 
 // Partitioned comparison and scalar/vector metadata relation for update modes.

@@ -38,6 +38,10 @@ int main() {
             require(bool(dut.contradiction) == (expected.contradiction || expected.segment_conflict),
                     "contradiction differs");
             require(bool(dut.forced_conflict) == expected.forced_conflict, "forced conflict differs");
+            unsigned rows = 0;
+            for (unsigned c = 0; c < 81; ++c)
+                if (board[c] != expected.next[c]) rows |= 1u << (c/9);
+            require(dut.row_changed == rows, "row change mask differs");
         };
         reference::Board truth;
         for (unsigned r = 0; r < 9; ++r)
@@ -49,6 +53,14 @@ int main() {
                 if (trial % 2) board[c] |= truth[c];
             }
             compare(board);
+            if (SEGMENT_RULES_MODE >= 3) {
+                auto old = segment_model::step(board,segment_model::Mode::triples);
+                auto next = segment_model::step(board,segment_model::Mode(SEGMENT_RULES_MODE));
+                for (unsigned c = 0; c < 81; ++c) {
+                    require(!(next.next[c] & ~old.next[c]), "pair mode lost a triple elimination");
+                    if (trial % 2) require(next.next[c] & truth[c], "pair mode removed a solution digit");
+                }
+            }
         }
         // Each fixed triple has three distinct digits in this known solution.
         // Enumerate every nonempty candidate subset containing each true digit:
@@ -72,7 +84,8 @@ int main() {
                         }
                         require(reference::valid_solution(board,truth), "invalid solution witness");
                         compare(board);
-                        for (auto mode : {segment_model::Mode::contradiction,segment_model::Mode::triples}) {
+                        for (auto mode : {segment_model::Mode::contradiction,segment_model::Mode::triples,
+                                          segment_model::Mode::pairs_triples,segment_model::Mode::bivalue_pairs}) {
                             auto result = segment_model::step(board,mode);
                             require(!result.contradiction && !result.segment_conflict && !result.forced_conflict,
                                     "legal assignment declared contradictory");
@@ -103,8 +116,81 @@ int main() {
                 }
             }
         }
+        unsigned pair_cases = 0, support_cases = 0;
+        if (SEGMENT_RULES_MODE >= 3) {
+            // Every fixed segment, every source pair (including nonadjacent
+            // cells), every pair of digits. Triple mode is already stalled;
+            // pair mode must remove exactly from the shared line/box peers.
+            for (unsigned o = 0; o < 2; ++o)
+                for (unsigned line = 0; line < 9; ++line)
+                    for (unsigned part = 0; part < 3; ++part)
+                        for (unsigned excluded = 0; excluded < 3; ++excluded)
+                            for (unsigned d = 0; d < 9; ++d)
+                                for (unsigned e = d+1; e < 9; ++e) {
+                                    auto cells = segment_model::segment(o,line,part);
+                                    auto a = cells[(excluded+1)%3], b = cells[(excluded+2)%3];
+                                    unsigned digits = (1u << d) | (1u << e);
+                                    reference::Board board;
+                                    board.fill(511); board[a] = board[b] = digits;
+                                    compare(board);
+                                    auto old = segment_model::step(board,segment_model::Mode::triples);
+                                    require(old.next == board, "strict-strength witness is not stalled in mode 2");
+                                    auto next = unpack(dut.candidates_out);
+                                    unsigned box = (a/27)*3+(a%9)/3;
+                                    for (unsigned c = 0; c < 81; ++c) {
+                                        bool shares = (o == 0 ? c/9 == line : c%9 == line) ||
+                                            (c/27)*3+(c%9)/3 == box;
+                                        auto expected = c != a && c != b && shares ? board[c] & ~digits : board[c];
+                                        require(next[c] == expected, "pair source exclusion or target mismatch");
+                                    }
+                                    ++pair_cases;
+                                }
+            // Independent local oracle: enumerate distinct digit assignments,
+            // rather than Hall subsets, for every 4-digit domain combination.
+            // Check both orientations, empty domains and Hall contradictions.
+            for (unsigned o = 0; o < 2; ++o) {
+                auto cells = segment_model::segment(o,4,1);
+                for (unsigned pattern = 0; pattern < 4096; ++pattern) {
+                    reference::Board board;
+                    board.fill(511);
+                    for (unsigned k = 0; k < 3; ++k) board[cells[k]] = (pattern >> (4*k)) & 15;
+                    std::array<unsigned,3> supported{};
+                    bool possible = false;
+                    for (unsigned a = 0; a < 4; ++a)
+                        for (unsigned b = 0; b < 4; ++b)
+                            for (unsigned c = 0; c < 4; ++c)
+                                if (a != b && a != c && b != c &&
+                                    (board[cells[0]] & (1u << a)) &&
+                                    (board[cells[1]] & (1u << b)) &&
+                                    (board[cells[2]] & (1u << c))) {
+                                    possible = true;
+                                    supported[0] |= 1u << a; supported[1] |= 1u << b; supported[2] |= 1u << c;
+                                }
+                    compare(board);
+                    require(bool(dut.contradiction) == !possible, "local feasibility differs from assignment oracle");
+                    if (possible) {
+                        auto next = unpack(dut.candidates_out);
+                        if (SEGMENT_RULES_MODE == 4) {
+                            // The inexpensive variant omits the one-update
+                            // singleton+bivalue shortcut, not the closure.
+                            auto state = board;
+                            for (unsigned round = 0; round < 5; ++round) {
+                                compare(state);
+                                next = unpack(dut.candidates_out);
+                                if (next == state) break;
+                                state = next;
+                            }
+                        }
+                        for (unsigned k = 0; k < 3; ++k)
+                            require(next[cells[k]] == supported[k], "local support is not complete");
+                    }
+                    ++support_cases;
+                }
+            }
+        }
         std::cout << "PASS mode=" << SEGMENT_RULES_MODE << ": 8000 random RTL/model comparisons; " << preservation_cases
-                  << " solution-preserving segment cases; all 54 removal/contradiction locations\n";
+                  << " solution-preserving segment cases; all 54 removal/contradiction locations; "
+                  << pair_cases << " strict-strength pair cases; " << support_cases << " assignment-oracle cases\n";
     } catch (const std::exception& e) {
         std::cerr << "FAIL: " << e.what() << '\n';
         return 1;

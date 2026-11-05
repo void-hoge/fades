@@ -24,14 +24,18 @@ int main(int argc, char** argv) {
         if (argc == 3) {
             detail.open(argv[2]);
             if (!detail) throw std::runtime_error("cannot open per-problem CSV");
-            detail << "mode,problem,infer,branches,contradictions,extra_removed,segment_conflict_cycles\n";
+            detail << "mode,problem,infer,branches,contradictions,extra_removed,segment_conflict_cycles,"
+                      "pair_extra_removed,pair_at_triple_stalls,pair_bits_at_triple_stalls\n";
         }
         std::cout << "mode,problems,infer,branches,contradictions,skip_events,max_pending,"
                      "tight_segments,useful_segments,useful_cycles,extra_removed,segment_conflict_cycles,"
-                     "estimated_cycles,cycles_per_problem,relative_throughput\n";
+                     "estimated_cycles,cycles_per_problem,relative_throughput,"
+                     "tight_pairs,pair_useful_cycles,pair_extra_removed,"
+                     "pair_at_triple_stalls,pair_bits_at_triple_stalls\n";
         std::uint64_t baseline_cycles = 0;
-        const char* names[] = {"baseline","segment-contradiction","segment-triples"};
-        for (unsigned variant = 0; variant < 3; ++variant) {
+        const char* names[] = {"baseline","segment-contradiction","segment-triples","segment-pairs-triples",
+                               "segment-bivalue-pairs"};
+        for (unsigned variant = 0; variant < 5; ++variant) {
             segment_model::Stats total;
             for (unsigned p = 0; p < puzzles.size(); ++p) {
                 auto board = puzzles[p];
@@ -41,7 +45,10 @@ int main(int argc, char** argv) {
                 if (detail.is_open()) detail << names[variant] << ',' << p+1 << ',' << total.infer-before.infer
                     << ',' << total.branches-before.branches << ',' << total.contradictions-before.contradictions
                     << ',' << total.extra_removed-before.extra_removed << ','
-                    << total.segment_conflict_cycles-before.segment_conflict_cycles << '\n';
+                    << total.segment_conflict_cycles-before.segment_conflict_cycles << ','
+                    << total.pair_extra_removed-before.pair_extra_removed << ','
+                    << total.pair_at_triple_stalls-before.pair_at_triple_stalls << ','
+                    << total.pair_bits_at_triple_stalls-before.pair_bits_at_triple_stalls << '\n';
             }
             // Match core's infer/branch accounting. Three cycles per discard
             // approximate root reload; additional branch-pop RAM stalls are
@@ -53,7 +60,10 @@ int main(int argc, char** argv) {
                       << total.max_pending << ',' << total.tight_segments << ',' << total.useful_segments << ','
                       << total.useful_cycles << ',' << total.extra_removed << ',' << total.segment_conflict_cycles
                       << ',' << cycles << ',' << std::fixed << std::setprecision(6)
-                      << double(cycles)/puzzles.size() << ',' << double(baseline_cycles)/cycles << std::endl;
+                      << double(cycles)/puzzles.size() << ',' << double(baseline_cycles)/cycles << ','
+                      << total.tight_pairs << ',' << total.pair_useful_cycles << ','
+                      << total.pair_extra_removed << ',' << total.pair_at_triple_stalls << ','
+                      << total.pair_bits_at_triple_stalls << std::endl;
         }
         if (argc == 3) { detail.flush(); if (!detail) throw std::runtime_error("cannot write per-problem CSV"); }
     } catch (const std::exception& e) {

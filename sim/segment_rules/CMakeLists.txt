@@ -1,6 +1,18 @@
 add_executable(segment_benchmark segment_benchmark.cpp)
 target_link_libraries(segment_benchmark PRIVATE sudoku_reference)
-foreach(mode RANGE 0 2)
+fades_formal(formal-segment-pairs formal_segment_pairs
+    "${PROJECT_SOURCE_DIR}/rtl/deduction_engine.sv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/formal_segment_pairs.sv")
+fades_formal(formal-pair-factorization formal_pair_factorization
+    "${PROJECT_SOURCE_DIR}/rtl/deduction_engine.sv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/formal_segment_pairs.sv")
+fades_formal(formal-bivalue-pairs formal_bivalue_pairs
+    "${PROJECT_SOURCE_DIR}/rtl/deduction_engine.sv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/formal_segment_pairs.sv")
+fades_formal(formal-pair-two-rounds formal_pair_two_rounds
+    "${PROJECT_SOURCE_DIR}/rtl/deduction_engine.sv"
+    "${CMAKE_CURRENT_SOURCE_DIR}/formal_segment_pairs.sv")
+foreach(mode RANGE 0 4)
     set(target "segment_model_test_${mode}")
     add_executable(${target} segment_model_test.cpp)
     target_link_libraries(${target} PRIVATE sudoku_reference)
@@ -12,7 +24,7 @@ foreach(mode RANGE 0 2)
     set_tests_properties(segment-model-${mode} PROPERTIES LABELS segment_rules TIMEOUT 120)
 endforeach()
 
-foreach(mode RANGE 1 2)
+foreach(mode RANGE 1 4)
     set(target "core_test_segment_${mode}")
     add_executable(${target} "${PROJECT_SOURCE_DIR}/sim/fades_core/core_test.cpp")
     target_link_libraries(${target} PRIVATE sudoku_reference)

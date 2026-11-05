@@ -13,8 +13,8 @@ set segment_rules [expr {$argc > 4 ? [lindex $argv 4] : 0}]
 if {![string is integer -strict $cores] || $cores < 1 || $cores > 6} {
     error "Core count must be between 1 and 6"
 }
-if {![string is integer -strict $segment_rules] || $segment_rules < 0 || $segment_rules > 2} {
-    error "Segment rules must be 0 (baseline), 1 (contradiction) or 2 (naked triples)"
+if {![string is integer -strict $segment_rules] || $segment_rules < 0 || $segment_rules > 4} {
+    error "Segment rules must be 0 (baseline), 1 (contradiction), 2 (triples), 3 (pairs+triples) or 4 (bivalue pairs+triples)"
 }
 if {$stage ni {bd synth bit export}} { error "Stage must be bd, synth, bit or export" }
 set boards [file join $::env(XILINX_VIVADO) data xhub boards XilinxBoardStore boards Xilinx]

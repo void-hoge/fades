@@ -16,6 +16,14 @@ Singles / Locked Candidates、セル候補二分探索に小さい規則を追�
 |0|従来のSingles＋Pointing / Claiming|
 |1|上記＋固定3セルの候補和が3種類未満なら矛盾|
 |2|上記＋候補和がちょうど3種類なら、同じ行・列・ブロックの対象外セルからその3数字を除去|
+|3|値2＋固定3セル内の全2セル部分集合について、候補和が2種類なら、その行・列・ブロックの対象2セル以外から除去|
+|4|値2＋候補が同じ2数字のセル対に限定。セルの2候補判定とセグメント重複情報を共有|
+
+値3の追加実験は [PAIR_RESULTS.md](PAIR_RESULTS.md) を参照。
+値4の軽量化候補は [PAIR_FACTORIZATION.md](PAIR_FACTORIZATION.md) を参照。
+値4の6コア・100 MHz配置配線結果は [PAIR_IMPLEMENTATION.md](PAIR_IMPLEMENTATION.md) に記録。
+値2との最新の実機A/B測定は [PAIR_KV260_RESULTS.md](PAIR_KV260_RESULTS.md) を参照。
+以下の配置配線・実機結果は値2の結果であり、値3/4には適用しない。
 
 対象はブロック内の横3セル27組・縦3セル27組。既存の `row_segment` /
 `col_segment` を再利用する。値2はNaked Tripleをこの54組に限定したもの。

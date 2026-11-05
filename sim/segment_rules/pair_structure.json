@@ -1,0 +1,39 @@
+{
+  "scope": "cell empty/single/fixed + segment E/M + pairs/reserved only",
+  "mapping": "unmapped structurally hashed AIG; not FPGA resources/timing",
+  "cell_only": {
+    "and_nodes": 6561,
+    "max_and_depth": 13,
+    "max_gate_fanout": 10
+  },
+  "union_counting": {
+    "and_nodes": 16767,
+    "max_and_depth": 17,
+    "max_gate_fanout": 10
+  },
+  "shared_cardinality": {
+    "and_nodes": 20007,
+    "max_and_depth": 19,
+    "max_gate_fanout": 14
+  },
+  "bivalue_only": {
+    "and_nodes": 13689,
+    "max_and_depth": 18,
+    "max_gate_fanout": 10
+  },
+  "bivalue_shared_multi": {
+    "and_nodes": 13311,
+    "max_and_depth": 18,
+    "max_gate_fanout": 10
+  },
+  "shared_and_node_reduction_fraction": -0.19323671497584538,
+  "bivalue_and_node_reduction_fraction": 0.18357487922705318,
+  "multi_total_and_node_reduction_fraction": 0.2061191626409018,
+  "multi_incremental_and_node_reduction_fraction": 0.3386243386243386,
+  "incremental_pair_and_nodes": {
+    "union_counting": 10206,
+    "shared_cardinality": 13446,
+    "bivalue_only": 7128,
+    "bivalue_shared_multi": 6750
+  }
+}

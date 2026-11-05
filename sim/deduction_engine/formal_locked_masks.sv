@@ -87,8 +87,21 @@ module formal_locked_masks (
     wire [728:0] actual, expected;
     wire actual_conflict, expected_conflict, expected_changed;
     wire actual_segment_conflict;
+    wire [242:0] row_segments, col_segments;
+    // Baseline mode does not consume these features; tie them low.
+    wire [80:0] cell_two = 81'b0;
+    genvar s;
+    generate for (s = 0; s < 27; s = s + 1) begin : segments
+        localparam integer R = (s/3)*9+(s%3)*3;
+        localparam integer C = (s%3)*27+s/3;
+        assign row_segments[9*s +: 9] = candidates_in[9*R +: 9] |
+            candidates_in[9*(R+1) +: 9] | candidates_in[9*(R+2) +: 9];
+        assign col_segments[9*s +: 9] = candidates_in[9*C +: 9] |
+            candidates_in[9*(C+9) +: 9] | candidates_in[9*(C+18) +: 9];
+    end endgenerate
     inference_rules dut(candidates_in, fixed_digits, unit_used, unit_unique,
-        actual, actual_conflict, actual_segment_conflict);
+        actual, actual_conflict, actual_segment_conflict, row_segments, col_segments,
+        cell_two, 243'b0, 243'b0);
     reference_inference_rules reference_rules(candidates_in, fixed_digits,
         unit_used, unit_unique, expected, expected_changed, expected_conflict);
     assign mismatch = (actual != expected) || (actual_conflict != expected_conflict) ||
