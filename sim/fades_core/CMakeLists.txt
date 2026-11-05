@@ -2,6 +2,7 @@ add_executable(core_test core_test.cpp)
 target_link_libraries(core_test PRIVATE sudoku_reference)
 verilate(core_test SOURCES ${FADES_CORE_RTL} TOP_MODULE fades_core
     PREFIX Vfades_core VERILATOR_ARGS --assert --language 1800-2017
+    -GLOCKED_CANDIDATES=${FADES_LOCKED_CANDIDATES}
     --output-split 20000 --output-split-cfuncs 200)
 add_test(NAME fades-core COMMAND core_test "${FADES_DATASET}"
     "${CMAKE_CURRENT_BINARY_DIR}/results.csv" 0)
@@ -18,7 +19,7 @@ list(TRANSFORM synth_sources PREPEND "\"")
 list(TRANSFORM synth_sources APPEND "\"")
 string(JOIN " " rtl_sources ${synth_sources})
 add_test(NAME synth-core COMMAND "${YOSYS_EXECUTABLE}" -Q -q -l "${CMAKE_CURRENT_BINARY_DIR}/synth.log"
-    -p "read_verilog -sv ${rtl_sources}; hierarchy -check -top fades_core; proc; opt; memory_dff; memory_collect; opt_clean; check -assert; select -assert-none t:$dlatch t:$_DLATCH_*; stat")
+    -p "read_verilog -sv ${rtl_sources}; chparam -set LOCKED_CANDIDATES ${FADES_LOCKED_CANDIDATES} fades_core; hierarchy -check -top fades_core; proc; opt; memory_dff; memory_collect; opt_clean; check -assert; select -assert-none t:$dlatch t:$_DLATCH_*; stat")
 set_tests_properties(synth-core PROPERTIES LABELS fades_core TIMEOUT 120)
 add_custom_target(synth COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -R "^synth-core$"
     WORKING_DIRECTORY "${PROJECT_BINARY_DIR}" USES_TERMINAL VERBATIM)

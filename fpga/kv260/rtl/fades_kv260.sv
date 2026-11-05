@@ -3,7 +3,8 @@
 // This SystemVerilog file uses the Verilog subset: Vivado 2024.2 module
 // references require FILE_TYPE=Verilog for the boundary file (set by build.tcl).
 module fades_kv260 #(
-    parameter integer CORES = 6
+    parameter integer CORES = 6,
+    parameter integer LOCKED_CANDIDATES = 1
 ) (
     (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF s_axi:s_axis:m_axis, ASSOCIATED_RESET aresetn" *)
     input wire dma_clk,
@@ -23,7 +24,7 @@ module fades_kv260 #(
     output wire [127:0] m_axis_tdata, output wire [15:0] m_axis_tkeep,
     output wire m_axis_tvalid, m_axis_tlast, input wire m_axis_tready
 );
-    fades_axi #(.CORES(CORES)) impl (
+    fades_axi #(.CORES(CORES), .LOCKED_CANDIDATES(LOCKED_CANDIDATES)) impl (
         .dma_clk(dma_clk), .core_clk(core_clk), .aresetn(aresetn),
         .s_axi_awaddr(s_axi_awaddr), .s_axi_awprot(s_axi_awprot),
         .s_axi_awvalid(s_axi_awvalid), .s_axi_awready(s_axi_awready),

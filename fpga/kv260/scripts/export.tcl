@@ -16,6 +16,7 @@ proc export_firmware {root out} {
     }
     set summary [report_timing_summary -delay_type min_max -return_string -file $out/timing_summary.rpt]
     report_utilization -file $out/utilization.rpt
+    report_utilization -hierarchical -hierarchical_depth 12 -file $out/hierarchy.rpt
     report_io -file $out/io.rpt
     report_drc -file $out/drc.rpt
     report_route_status -file $out/route_status.rpt
@@ -59,7 +60,6 @@ proc export_firmware {root out} {
             error "Timing closure failed ($delay); inspect $out/timing_summary.rpt"
         }
     }
-    report_utilization -hierarchical -file $out/hierarchy.rpt
     write_checkpoint -force $out/verified_routed.dcp
     set bit [get_property DIRECTORY [get_runs impl_1]]/system_wrapper.bit
     write_cfgmem -force -format bin -interface SMAPx32 -disablebitswap \

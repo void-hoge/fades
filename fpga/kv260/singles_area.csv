@@ -1,0 +1,19 @@
+stage,cores,scope,instance,luts,logic_luts,lutram,srl,ffs,ramb36,ramb18,uram,dsp,clbs
+synthesized,1,board,system_wrapper,20626,18381,1964,281,20981,24,3,0,0,
+synthesized,1,core,solvers[0].solver,9800,9800,0,0,2255,20,1,0,0,
+synthesized,1,infer,solvers[0].solver/infer,3983,3983,0,0,0,0,0,0,0,
+synthesized,2,board,system_wrapper,31224,28979,1964,281,23608,44,4,0,0,
+synthesized,2,core,solvers[0].solver,10213,10213,0,0,2255,20,1,0,0,
+synthesized,2,infer,solvers[0].solver/infer,3983,3983,0,0,0,0,0,0,0,
+synthesized,2,core,solvers[1].solver,9729,9729,0,0,2255,20,1,0,0,
+synthesized,2,infer,solvers[1].solver/infer,3983,3983,0,0,0,0,0,0,0,
+synthesized,2-1,board_delta,incremental core plus integration,10598,10598,0,0,2627,20,1,0,0,
+routed,1,board,system_wrapper,20237,18081,1964,192,20205,24,3,0,0,4760
+routed,1,core,solvers[0].solver,10346,10346,0,0,2255,20,1,0,0,2111
+routed,1,infer,solvers[0].solver/infer,4181,4181,0,0,0,0,0,0,0,1048
+routed,2,board,system_wrapper,31483,29327,1964,192,22842,44,4,0,0,6690
+routed,2,core,solvers[0].solver,10686,10686,0,0,2255,20,1,0,0,2134
+routed,2,infer,solvers[0].solver/infer,4081,4081,0,0,0,0,0,0,0,990
+routed,2,core,solvers[1].solver,10458,10458,0,0,2255,20,1,0,0,2002
+routed,2,infer,solvers[1].solver/infer,4139,4139,0,0,0,0,0,0,0,912
+routed,2-1,board_delta,incremental core plus integration,11246,11246,0,0,2637,20,1,0,0,1930

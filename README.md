@@ -92,6 +92,12 @@ firmwareを配置し、`xmutil loadapp fades` と `insmod fades.ko` を実行す
 
 ## 3. 開発・検証する
 
+Singlesのみの構成は configure 時に `-DFADES_LOCKED_CANDIDATES=0` を指定する。
+既定値1はSingles＋Locked Candidates。PLビルドとコア／統合シミュレーションに
+同じ設定を使う。1・2コアの資源測定は
+`python3 fpga/kv260/scripts/singles_area_experiment.py --jobs 2` で逐次実行できる。
+測定結果と階層別CLB数は [Singles回路規模](fpga/kv260/SINGLES_AREA_RESULTS.md) を参照。
+
 ```sh
 cmake --preset host -DFADES_CORES=6
 cmake --build --preset host

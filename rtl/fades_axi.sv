@@ -1,7 +1,8 @@
 `timescale 1ns/1ps
 // AXI-Lite control at dma_clk; independent AW/W buffering and held responses.
 module fades_axi #(
-    parameter integer CORES = 6
+    parameter integer CORES = 6,
+    parameter integer LOCKED_CANDIDATES = 1
 ) (
     (* X_INTERFACE_PARAMETER = "ASSOCIATED_BUSIF S_AXI:S_AXIS:M_AXIS, ASSOCIATED_RESET aresetn, FREQ_HZ 200000000" *)
     input wire dma_clk,
@@ -48,7 +49,7 @@ module fades_axi #(
 `ifndef SYNTHESIS
     initial if (CORES < 1 || CORES > 6) $fatal(1, "CORES must be between 1 and 6");
 `endif
-    fades #(.CORES(CORES)) stream (
+    fades #(.CORES(CORES), .LOCKED_CANDIDATES(LOCKED_CANDIDATES)) stream (
         .dma_clk(dma_clk), .core_clk(core_clk), .reset(reset),
         .enable(enable_sync[1]), .total_records(total_records), .packet_records(packet_records),
         .s_axis_tdata(s_axis_tdata), .s_axis_tkeep(s_axis_tkeep),

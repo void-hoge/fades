@@ -27,6 +27,7 @@ foreach(top IN ITEMS fades_core fades fades_axi fades_kv260)
             list(APPEND sources "${PROJECT_SOURCE_DIR}/fpga/kv260/rtl/fades_kv260.sv")
         endif()
     endif()
+    list(APPEND params -GLOCKED_CANDIDATES=${FADES_LOCKED_CANDIDATES})
     add_test(NAME lint-${top} COMMAND "${VERILATOR_BIN}" --lint-only --language 1800-2017
         -Wall --top-module ${top} ${params} ${sources})
     set_tests_properties(lint-${top} PROPERTIES LABELS "${suite}" TIMEOUT 120)

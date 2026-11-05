@@ -1,5 +1,5 @@
 # Full KV260 board design.
-# Arguments: output directory, stage (bd/synth/bit/export), parallel jobs, cores.
+# Arguments: output directory, stage (bd/synth/bit/export), parallel jobs, cores, locked candidates.
 set root [file normalize [file dirname [info script]]/../../..]
 
 source [file join [file dirname [info script]] export.tcl]
@@ -9,6 +9,8 @@ set out [file normalize [expr {$argc > 0 ? [lindex $argv 0] : "$root/build/kv260
 set stage [expr {$argc > 1 ? [lindex $argv 1] : "bit"}]
 set jobs [expr {$argc > 2 ? [lindex $argv 2] : 4}]
 set cores [expr {$argc > 3 ? [lindex $argv 3] : 6}]
+set locked_candidates [expr {$argc > 4 ? [lindex $argv 4] : 1}]
+if {$locked_candidates ni {0 1}} { error "Locked candidates must be 0 or 1" }
 if {![string is integer -strict $cores] || $cores < 1 || $cores > 6} {
     error "Core count must be between 1 and 6"
 }
@@ -88,6 +90,13 @@ set_property -dict [list \
 
 create_bd_cell -type module -reference fades_kv260 solver
 set_property CONFIG.CORES $cores [get_bd_cells solver]
+set_property CONFIG.LOCKED_CANDIDATES $locked_candidates [get_bd_cells solver]
+set config_report [open $out/solver_configuration.txt w]
+puts $config_report "CORES=[get_property CONFIG.CORES [get_bd_cells solver]]"
+puts $config_report "LOCKED_CANDIDATES=[get_property CONFIG.LOCKED_CANDIDATES [get_bd_cells solver]]"
+puts $config_report "CORE_CLOCK_TARGET_MHZ=100"
+puts $config_report "DMA_CLOCK_TARGET_MHZ=200"
+close $config_report
 set_property CONFIG.FREQ_HZ [get_property CONFIG.FREQ_HZ [get_bd_pins ps/pl_clk0]] [get_bd_pins solver/dma_clk]
 set_property CONFIG.FREQ_HZ [get_property CONFIG.FREQ_HZ [get_bd_pins ps/pl_clk1]] [get_bd_pins solver/core_clk]
 connect_bd_net [get_bd_pins ps/pl_clk1] [get_bd_pins solver/core_clk]
@@ -167,6 +176,11 @@ if {[get_property PROGRESS [get_runs synth_1]] ne "100%"} { error "Synthesis fai
 if {[get_property NEEDS_REFRESH [get_runs synth_1]]} {
     error "Sources changed during synthesis; rerun with a stable source tree"
 }
+open_run synth_1
+report_utilization -file $out/synth_utilization.rpt
+report_utilization -hierarchical -hierarchical_depth 12 -file $out/synth_hierarchy.rpt
+report_timing_summary -file $out/synth_timing_summary.rpt
+close_design
 if {$stage eq "synth"} { exit }
 set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
 launch_runs impl_1 -to_step write_bitstream -jobs $jobs

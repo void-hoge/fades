@@ -2,7 +2,7 @@
 // Inference engine: every rule and validation read the same current state.
 // The core registers the successor and metadata; validation is NOT cascaded
 // after inference. Helpers below are local building blocks of this engine.
-module deduction_engine (
+module deduction_engine #(parameter integer LOCKED_CANDIDATES = 1) (
     input wire [728:0] candidates_in,
     output wire [728:0] candidates_out,
     output wire solved,
@@ -14,7 +14,7 @@ module deduction_engine (
     wire [242:0] unit_used, unit_unique;
     analysis analyze(candidates_in, fixed_digits, unit_used, unit_unique,
         solved, contradiction);
-    inference_rules rules(candidates_in, fixed_digits, unit_used, unit_unique,
+    inference_rules #(.LOCKED_CANDIDATES(LOCKED_CANDIDATES)) rules(candidates_in, fixed_digits, unit_used, unit_unique,
         candidates_out, forced_conflict);
     genvar row;
     generate for (row = 0; row < 9; row = row + 1) begin : changes
@@ -25,7 +25,7 @@ endmodule
 
 // Singles and locked candidates, consuming the shared analysis.
 /* verilator lint_off DECLFILENAME */
-module inference_rules (
+module inference_rules #(parameter integer LOCKED_CANDIDATES = 1) (
     input wire [728:0] candidates_in,
     input wire [728:0] fixed_digits,
     input wire [242:0] unit_used,
@@ -90,7 +90,7 @@ module inference_rules (
             assign candidates[i] = candidates_in[9*i +: 9];
             assign peer_digits = (row_used[R] | col_used[C] | box_used[B]) & ~fixed_digits[9*i +: 9];
             assign removed = peer_digits |
-                row_locked[R*3+C/3] | col_locked[C*3+R/3];
+                (LOCKED_CANDIDATES != 0 ? (row_locked[R*3+C/3] | col_locked[C*3+R/3]) : 9'b0);
             assign forced = candidates[i] & (row_unique[R] | col_unique[C] | box_unique[B]);
             assign candidates_out[9*i +: 9] = candidates[i] & ~removed &
                 ((forced != 0) ? forced : 9'h1ff);
