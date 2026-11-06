@@ -1,0 +1,3 @@
+# Applied in top-level synthesis and implementation, after PS IP constraints.
+create_clock -name clk_pl_0 -period @dma_period@ [get_pins {system_i/ps/inst/PS8_i/PLCLK[0]}]
+create_clock -name clk_pl_1 -period @core_period@ [get_pins {system_i/ps/inst/PS8_i/PLCLK[1]}]

@@ -23,8 +23,46 @@ module deduction_engine (
     end endgenerate
 endmodule
 
-// Singles and locked candidates, consuming the shared analysis.
+// One naked-single propagation pass for a newly loaded problem. Singleton
+// cells remain unchanged, including duplicates, so validation still detects
+// contradictory givens. No Hidden Single forcing or forced-conflict metadata
+// is introduced here; newly created singletons propagate on the next pass.
 /* verilator lint_off DECLFILENAME */
+module naked_single_preload (
+    input wire [728:0] candidates_in,
+    output wire [728:0] candidates_out
+);
+    wire [728:0] fixed_digits;
+    wire [8:0] unit_used [0:26];
+    genvar i, u, p;
+    generate
+        for (i = 0; i < 81; i = i + 1) begin : cells
+            localparam integer R = i / 9;
+            localparam integer C = i % 9;
+            localparam integer B = (R / 3) * 3 + C / 3;
+            wire [8:0] mask = candidates_in[9*i +: 9];
+            wire single = (mask != 0) && ((mask & (mask - 9'd1)) == 0);
+            assign fixed_digits[9*i +: 9] = single ? mask : 9'b0;
+            wire [8:0] removed = (unit_used[R] | unit_used[9+C] | unit_used[18+B]) &
+                ~fixed_digits[9*i +: 9];
+            assign candidates_out[9*i +: 9] = mask & ~removed;
+        end
+        for (u = 0; u < 27; u = u + 1) begin : units
+            wire [8:0] masks [0:8];
+            for (p = 0; p < 9; p = p + 1) begin : positions
+                localparam integer CELL = (u < 9) ? u*9+p :
+                    ((u < 18) ? p*9+(u-9) :
+                    ((u-18)/3)*27+((u-18)%3)*3+(p/3)*9+p%3);
+                assign masks[p] = fixed_digits[9*CELL +: 9];
+            end
+            assign unit_used[u] = (masks[0] | masks[1] | masks[2]) |
+                (masks[3] | masks[4] | masks[5]) |
+                (masks[6] | masks[7] | masks[8]);
+        end
+    endgenerate
+endmodule
+
+// Singles and locked candidates, consuming the shared analysis.
 module inference_rules (
     input wire [728:0] candidates_in,
     input wire [728:0] fixed_digits,

@@ -3,8 +3,10 @@
 KV260 向けの SystemVerilog 数独ソルバー。Singles / Locked Candidates を並列適用し、停滞時は候補を二分して深さ優先探索する。
 PS の Linux プログラムから DDR / AXI DMA 経由で問題を投入し、ID 付きの結果を回収する。
 
-既定の実機構成は **6 コア × 100 MHz、DMA 200 MHz**。コア数は1〜6で指定できる。
+既定の実機構成は **6 コア × 約115.385 MHz、DMA 187.5 MHz**。コア数は1〜6で指定できる。
 最初の解を返し、解なしも結果を 1 件返す。問題の一意性を証明する処理ではない。
+
+入力の候補マスク変換・確定数字の先行伝播は、全コア共有の2段パイプラインで行う。
 
 ビルド・検証の基本操作は **configure → build → test**。
 以下のコマンドは、対象の開発機またはKV260上のリポジトリルートで実行する。
@@ -59,6 +61,8 @@ cmake --build --preset kv260-pl
 ```
 
 通常のbuildで、回路生成・出力検査からfirmwareパッケージ生成まで実行する。
+合成・配置配線にはcore 8.666 ns / DMA 5.333 nsの制約を適用し、
+配線後の `AggressiveExplore` 物理最適化と最終タイミング検査も自動実行する。
 Vivadoのパスを指定する場合は、configure時に
 `-DVIVADO_EXECUTABLE=/tools/Xilinx/Vivado/2024.2/bin/vivado` を追加する。
 `FADES_VIVADO_JOBS` はVivado内部の並列数。
@@ -182,7 +186,12 @@ ctest --test-dir build/host-1core --output-on-failure -L '^fades$'
 ## 実測
 
 KV260 実機で 17 ヒント 49,158 問と Hard 1106 の 375 問を CPU 参照解と照合済み。
-準備済み DDR の 10 秒ストレス測定では、17 ヒント集合 **22.34 Mproblem/s**、Hard 1106 **0.7032 Mproblem/s**。入力準備と前後の全解検証は計測外。
-6コア100 MHz / DMA 200 MHz、131,072件を反復する条件で、件数は延べ投入数。
-計測中は DMA 完了・PL件数を検査し、前後のバッチを全件検証する。
+2026-11-07、通常の `kv260-pl` ビルド（Vivado 2024.2、6コア、並列数4）で生成した回路を使用。
+実クロックはcore **115,384,615 Hz** / DMA **187,499,999 Hz**、kernel `6.8.0-1015-xilinx`。
+準備済みDDRの17ヒント集合を10秒×3回測定し、**26.590488 / 26.597169 / 26.597688 Msolve/s**、
+中央値 **26.597169 Msolve/s**。131,072件、8 DMAスロット×1 MiBを反復し、最終排出を計測に含む。
+CPU参照・入力準備・計測前後の全解検証は計測外。件数は延べ投入数。
+全測定Errors=0、各回の計測前後131,072件の全解・ID検証PASS、測定中のdmesg追加0行。
+ABI・全49,158問・mixed入力・難問375問の機能試験もPASS。
+最終タイミングはcore WNS +0.055 ns / DMA WNS +0.042 ns、全体WHS +0.010 ns、TNS / THS 0。
 入力データの出所は [sim/README.md](sim/README.md#問題集)。

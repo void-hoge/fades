@@ -102,20 +102,23 @@ static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool st
           d.collected_count==ps.size() && d.output_count==ps.size(),"Counter mismatch");
     if(stress) check(d.input_stall_cycles>0,"Backpressure not exercised");
     check(d.queue_peak>0 && d.queue_peak<=64 && d.processing_cycles>0,"Invalid queue or work counters");
-    uint64_t sum_sent=0,sum_got=0;
+    uint64_t sum_sent=0,sum_got=0,sum_busy=0;
     for(unsigned g=0;g<FADES_CORES;++g) {
 #if FADES_CORES == 1
         sum_sent += d.core_dispatch_counts;
         sum_got += d.core_result_counts;
+        sum_busy += d.core_busy_cycles;
         check(d.core_max_inflight<=2,"Per-core limit exceeded");
 #else
         sum_sent+=uint64_t(d.core_dispatch_counts[2*g]) | uint64_t(d.core_dispatch_counts[2*g+1])<<32;
         sum_got+=uint64_t(d.core_result_counts[2*g]) | uint64_t(d.core_result_counts[2*g+1])<<32;
+        sum_busy+=uint64_t(d.core_busy_cycles[2*g]) | uint64_t(d.core_busy_cycles[2*g+1])<<32;
         check(d.core_max_inflight[2*g]<=2,"Per-core limit exceeded");
 #endif
     }
     check(sum_sent==ps.size() && sum_got==ps.size(),"Per-core accounting mismatch");
-    std::cout<<"PASS "<<ps.size()<<" records, stress="<<stress<<", time steps="<<s.t-start<<'\n';
+    std::cout<<"PASS "<<ps.size()<<" records, stress="<<stress<<", time steps="<<s.t-start
+             <<", processing_cycles="<<d.processing_cycles<<", core_busy_cycles="<<sum_busy<<'\n';
 }
 int main(int argc,char** argv) try {
     Verilated::commandArgs(argc,argv);

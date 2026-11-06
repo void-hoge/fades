@@ -1,7 +1,7 @@
 # KV260 ボード実装
 
 FPGA アプリは **`fades`**、Linux デバイスは **`/dev/fades`**、
-Linux モジュールは **`fades.ko`**。既定構成は6コア / 100 MHz、DMA / AXI-Liteは200 MHz。
+Linux モジュールは **`fades.ko`**。既定構成は6コア / 約115.385 MHz、DMA / AXI-Liteは187.5 MHz。
 `FADES_CORES` で1〜6コアを指定できる。
 
 ## ハードウェア
@@ -23,8 +23,9 @@ Linux モジュールは **`fades.ko`**。既定構成は6コア / 100 MHz、DMA
 |`CMakeLists.txt`|Vivado実行とfirmwareパッケージの定義|
 |`scripts/build.tcl`|回路生成から実装・検査・firmware出力まで|
 |`scripts/export.tcl`|`build.tcl`から呼ばれる。実装済み回路の検査とfirmware/XSA出力|
+|`constraints/clocks.xdc.in` / `scripts/configuration.tcl.in`|CMakeの共通クロック設定から生成する制約とPS設定|
 |`rtl/fades_kv260.sv`|IP Integratorとリポジトリ直下の`rtl/fades_axi.sv`を接続するラッパー|
-|`overlay.dts`|LinuxにDMA・IRQ・クロック・制御レジスターを教えるDevice Tree|
+|`overlay.dts.in`|LinuxにDMA・IRQ・クロック・制御レジスターを教えるDevice Treeのテンプレート|
 |`shell.json`|`xmutil`がFPGAアプリを認識するための定義|
 
 `constraints/` の `fan.xdc` はファン端子、`solver_cdc.xdc` はクロック境界の
@@ -50,6 +51,16 @@ cmake --build --preset kv260-pl
 単一コアもこの実装経路を使う。ABIは6コア分のカウンター領域を保持し、未実装分は0。
 
 通常のbuildで回路生成・検査・firmwareパッケージまで実行する。
+クロック設定は `CMakeLists.txt` で一元管理し、PS設定・タイミング制約・DTBOに反映する。
+動作周波数はcore 115,384,615 Hz / DMA 187,500,000 Hz。
+制約周期は1 ps単位で切り下げた **core 8.666 ns / DMA 5.333 ns** を
+トップレベル合成と配置配線の両方に適用する。XPMのCDC制約もこの周期から評価される。
+BDはIPごとのOOC合成ではなく一括合成し、ソルバーにも合成時からクロック制約を適用する。
+
+実装は `Performance_ExplorePostRoutePhysOpt` strategyで配置・物理最適化・配線の後、
+`phys_opt_design -directive AggressiveExplore` を実行してからbitstreamを生成する。
+最終結果のタイミング検査に失敗した場合はfirmwareパッケージを生成しない。
+追加のTcl実行やDevice Treeの手編集は不要。
 既定出力は `build/kv260-pl/fpga/kv260/`。configure時の `-B` で変更できる。
 `VIVADO_EXECUTABLE` と `DTC_EXECUTABLE` でツールのパスを明示指定できる。
 `FADES_VIVADO_JOBS` はVivado内部の並列数で、CMakeの `--parallel` とは独立。
