@@ -11,5 +11,8 @@ __pycache__/
 # Local workstation instructions and scratch notes.
 /AGENTS.md
 /note.md
+/sim/fades/SHARED_PRELOAD_RESULTS.md
+/sim/fades_core/PRELOAD_RESULTS.md
+/fpga/kv260/SHARED_PRELOAD_RESULTS.md
 /.#*
 /#*#

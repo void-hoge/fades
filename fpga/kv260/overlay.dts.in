@@ -22,7 +22,7 @@
                 clock-names = "s_axi_lite_aclk", "m_axi_sg_aclk",
                               "m_axi_mm2s_aclk", "m_axi_s2mm_aclk";
                 assigned-clocks = <&zynqmp_clk 71>, <&zynqmp_clk 72>;
-                assigned-clock-rates = <200000000>, <100000000>;
+                assigned-clock-rates = <@dma_hz@>, <@core_hz@>;
                 interrupt-parent = <&gic>;
                 dma-channel-mm2s {
                     compatible = "xlnx,axi-dma-mm2s-channel";

@@ -1,5 +1,6 @@
 # Full KV260 board design.
-# Arguments: output directory, stage (bd/synth/bit/export), parallel jobs, cores.
+# Arguments: output directory, stage (bd/synth/bit/export), parallel jobs, cores,
+# CMake-generated configuration.tcl.
 set root [file normalize [file dirname [info script]]/../../..]
 
 source [file join [file dirname [info script]] export.tcl]
@@ -9,6 +10,8 @@ set out [file normalize [expr {$argc > 0 ? [lindex $argv 0] : "$root/build/kv260
 set stage [expr {$argc > 1 ? [lindex $argv 1] : "bit"}]
 set jobs [expr {$argc > 2 ? [lindex $argv 2] : 4}]
 set cores [expr {$argc > 3 ? [lindex $argv 3] : 6}]
+if {$argc != 5} { error "Use the CMake kv260-pl targets (configuration.tcl is required)" }
+source [file normalize [lindex $argv 4]]
 if {![string is integer -strict $cores] || $cores < 1 || $cores > 6} {
     error "Core count must be between 1 and 6"
 }
@@ -34,6 +37,8 @@ add_files [list $root/rtl/deduction_engine.sv $root/rtl/branch_generator.sv $roo
 # This thin .sv wrapper uses only the Verilog subset; the solver RTL stays SV.
 set_property FILE_TYPE Verilog [get_files fades_kv260.sv]
 update_compile_order -fileset sources_1
+add_files -fileset constrs_1 $clock_xdc
+set_property PROCESSING_ORDER LATE [get_files $clock_xdc]
 add_files -fileset constrs_1 $root/fpga/kv260/constraints/solver_cdc.xdc
 set_property USED_IN_SYNTHESIS false [get_files solver_cdc.xdc]
 set_property PROCESSING_ORDER LATE [get_files solver_cdc.xdc]
@@ -58,9 +63,9 @@ set_property -dict [list \
     CONFIG.PSU__TTC0__WAVEOUT__ENABLE {1} \
     CONFIG.PSU__TTC0__WAVEOUT__IO {EMIO} \
     CONFIG.PSU__USE__IRQ0 {1} \
-    CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ {200}] [get_bd_cells ps]
+    CONFIG.PSU__CRL_APB__PL0_REF_CTRL__FREQMHZ [expr {$dma_hz / 1000000.0}]] [get_bd_cells ps]
 set_property -dict [list CONFIG.PSU__FPGA_PL1_ENABLE {1} \
-    CONFIG.PSU__CRL_APB__PL1_REF_CTRL__FREQMHZ {100}] [get_bd_cells ps]
+    CONFIG.PSU__CRL_APB__PL1_REF_CTRL__FREQMHZ [expr {$core_hz / 1000000.0}]] [get_bd_cells ps]
 
 # Preserve Linux's TTC0 channel 2 fan PWM across a full PL reconfiguration.
 # Matches AMD's k26_base_starter_kit fan_en_b connection.
@@ -155,6 +160,10 @@ foreach seg [get_bd_addr_segs -of_objects [get_bd_addr_spaces]] {
     puts $address_report "$seg [get_property OFFSET $seg] [get_property RANGE $seg]"
 }
 close $address_report
+# Synthesize the complete BD under clocks.xdc. Per-IP OOC synthesis leaves the
+# module-reference solver without clock constraints and freezes that netlist
+# before the top-level timing constraints can influence synthesis.
+set_property synth_checkpoint_mode None [get_files system.bd]
 generate_target all [get_files system.bd]
 set wrapper [make_wrapper -files [get_files system.bd] -top]
 add_files -norecurse $wrapper
@@ -169,7 +178,10 @@ if {[get_property NEEDS_REFRESH [get_runs synth_1]]} {
     error "Sources changed during synthesis; rerun with a stable source tree"
 }
 if {$stage eq "synth"} { exit }
+set_property strategy Performance_ExplorePostRoutePhysOpt [get_runs impl_1]
 set_property STEPS.PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.IS_ENABLED true [get_runs impl_1]
+set_property STEPS.POST_ROUTE_PHYS_OPT_DESIGN.ARGS.DIRECTIVE AggressiveExplore [get_runs impl_1]
 launch_runs impl_1 -to_step write_bitstream -jobs $jobs
 wait_on_run impl_1
 if {[get_property PROGRESS [get_runs impl_1]] ne "100%"} { error "Implementation failed" }

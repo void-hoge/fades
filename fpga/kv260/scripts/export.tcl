@@ -1,6 +1,7 @@
 # Called by build.tcl after implementation or for an explicit export.
 # Checks the routed board design and writes loadable firmware/XSA/reports.
 proc export_firmware {root out} {
+    global core_period dma_period
     file delete -force $out/build_complete
     if {[current_project -quiet] eq ""} { open_project $out/project/fades.xpr }
     if {[get_property PROGRESS [get_runs impl_1]] ne "100%" ||
@@ -8,6 +9,12 @@ proc export_firmware {root out} {
         error "A completed write_bitstream run is required for export"
     }
     open_run impl_1
+    foreach {clock expected} [list clk_pl_0 $dma_period clk_pl_1 $core_period] {
+        set object [get_clocks -quiet $clock]
+        if {[llength $object] != 1 || abs([get_property PERIOD $object] - $expected) > 0.0001} {
+            error "Clock $clock must have period $expected ns"
+        }
+    }
     set fan_port [get_ports -quiet fan_en_b]
     if {[llength $fan_port] != 1 || [get_property PACKAGE_PIN $fan_port] ne "A12" ||
         [get_property IOSTANDARD $fan_port] ne "LVCMOS33" ||
@@ -66,6 +73,6 @@ proc export_firmware {root out} {
         -loadbit "up 0x0 $bit" -file $out/fades.bit.bin
     write_hw_platform -fixed -include_bit -force -file $out/fades.xsa
     set stamp [open $out/build_complete w]
-    puts $stamp "Vivado [version -short], KV260 fades, DMA 200 MHz target, fan PWM on A12"
+    puts $stamp "Vivado [version -short], KV260 fades, core [get_property PERIOD [get_clocks clk_pl_1]] ns / DMA [get_property PERIOD [get_clocks clk_pl_0]] ns, fan PWM on A12"
     close $stamp
 }
