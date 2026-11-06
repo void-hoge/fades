@@ -27,6 +27,7 @@ create_project -force $design_name $out/project -part xck26-sfvc784-2LV-c
 set_property board_part xilinx.com:kv260_som:part0:1.4 [current_project]
 set_property XPM_LIBRARIES {XPM_CDC XPM_MEMORY XPM_FIFO} [current_project]
 add_files [list $root/rtl/deduction_engine.sv $root/rtl/branch_generator.sv $root/rtl/fades_core.sv \
+    $root/rtl/problem_preprocessor.sv \
     $root/rtl/async_queue.sv $root/rtl/fades.sv $root/rtl/fades_axi.sv \
     $root/fpga/kv260/rtl/fades_kv260.sv]
 # IPI 2024.2 does not accept a SystemVerilog-typed module-reference boundary.

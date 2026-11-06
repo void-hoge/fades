@@ -22,6 +22,7 @@ set(FADES_CORE_RTL
     "${PROJECT_SOURCE_DIR}/rtl/branch_generator.sv"
     "${PROJECT_SOURCE_DIR}/rtl/fades_core.sv")
 set(FADES_STREAM_RTL ${FADES_CORE_RTL}
+    "${PROJECT_SOURCE_DIR}/rtl/problem_preprocessor.sv"
     "${PROJECT_SOURCE_DIR}/rtl/async_queue.sv"
     "${PROJECT_SOURCE_DIR}/rtl/fades.sv")
 set(FADES_AXI_RTL ${FADES_STREAM_RTL} "${PROJECT_SOURCE_DIR}/rtl/fades_axi.sv")

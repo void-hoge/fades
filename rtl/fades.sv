@@ -90,21 +90,15 @@ module fades #(
         end
     end
 
-    logic [728:0] candidates;
-    logic invalid_cells;
-    always_comb begin
-        candidates = 0;
-        invalid_cells = 0;
-        for (integer c = 0; c < 81; c = c+1) begin
-            if (queue_data[64+4*c +: 4] == 0)
-                candidates[9*c +: 9] = 9'h1ff;
-            else if (queue_data[64+4*c +: 4] <= 9)
-                candidates[9*c +: 9] = 9'b1 << (queue_data[64+4*c +: 4] - 1'b1);
-            else invalid_cells = 1;
-        end
-        // Invalid input takes the normal ordered result path, without search.
-        if (invalid_cells) candidates = 0;
-    end
+    wire [728:0] candidates;
+    wire [64:0] problem_tag;
+    wire problem_valid, problem_ready;
+    problem_preprocessor preprocess (
+        .clk(core_clk), .reset(core_reset),
+        .input_data(queue_data), .input_valid(queue_valid), .input_ready(queue_ready),
+        .output_candidates(candidates), .output_tag(problem_tag),
+        .output_valid(problem_valid), .output_ready(problem_ready)
+    );
     wire [CORES-1:0] core_ready, result_valid, result_solved, core_busy, output_wait;
     wire [728:0] result_candidates [0:CORES-1];
     logic [CORES-1:0] core_valid, result_ready;
@@ -131,15 +125,15 @@ module fades #(
         for (integer n = CORES-1; n >= 0; n = n-1)
             if (dispatch_mask[n]) selected = n;
         core_valid = 0;
-        if (!core_reset && queue_valid && selected != -1) core_valid[selected] = 1;
+        if (!core_reset && problem_valid && selected != -1) core_valid[selected] = 1;
         winner = -1;
         for (integer n = CORES-1; n >= 0; n = n-1)
             if (collect_mask[n]) winner = n;
         result_ready = 0;
         if (!core_reset && collect_ready && winner != -1) result_ready[winner] = 1;
     end
-    assign queue_ready = !core_reset && selected != -1;
-    wire dispatch = queue_valid && queue_ready;
+    assign problem_ready = !core_reset && selected != -1;
+    wire dispatch = problem_valid && problem_ready;
     wire collect = !core_reset && winner != -1 && collect_ready;
     logic [511:0] encoded_result;
     always_comb begin
@@ -183,7 +177,7 @@ module fades #(
             end else begin
                 inflight[g] <= inflight[g] + IW'(push) - IW'(pop);
                 if (push) begin
-                    ids[g][id_tail[g]] <= {invalid_cells, queue_data[63:0]};
+                    ids[g][id_tail[g]] <= problem_tag;
                     id_tail[g] <= int'(id_tail[g]) == INFLIGHT_LIMIT-1 ? 0 : id_tail[g]+1'b1;
                     core_dispatch_counts[64*g +: 64] <= core_dispatch_counts[64*g +: 64]+1'b1;
                 end

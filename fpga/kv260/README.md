@@ -4,6 +4,9 @@ FPGA アプリは **`fades`**、Linux デバイスは **`/dev/fades`**、
 Linux モジュールは **`fades.ko`**。既定構成は6コア / 100 MHz、DMA / AXI-Liteは200 MHz。
 `FADES_CORES` で1〜6コアを指定できる。
 
+共有入力前処理版の115.385 MHzタイミング検査・17ヒント実機ベンチマークは
+[SHARED_PRELOAD_RESULTS.md](SHARED_PRELOAD_RESULTS.md) を参照。
+
 ## ハードウェア
 
 - KV260 revB / K26、`xck26-sfvc784-2LV-c`、SOM 1.4 公式プリセット。

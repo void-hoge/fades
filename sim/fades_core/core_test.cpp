@@ -77,7 +77,7 @@ static std::vector<Problem> load_dataset(const char* path, unsigned limit) {
         validate(p, p.answer);
         problems.push_back(p);
     }
-    require(problems.size() >= prefill, "Half-full test needs at least 512 puzzles");
+    require(!problems.empty(), "Dataset is empty");
     return problems;
 }
 struct Stats {
@@ -86,6 +86,7 @@ struct Stats {
     uint64_t input_stalls = 0, disabled = 0, idle = 0, pops = 0;
     uint64_t concurrent_push_enqueue = 0, wasted = 0;
     unsigned max_pending = 0, max_queued = 0;
+    unsigned initial_prefill = 0;
 };
 static void write_totals(std::ostream& out, const Stats& s) {
     out << "{\"problems\":" << s.finishes << ",\"cycles\":" << s.cycles
@@ -98,7 +99,7 @@ static void write_totals(std::ostream& out, const Stats& s) {
         << ",\"max_pending\":" << s.max_pending << ",\"max_queued\":" << s.max_queued
         << ",\"input_stalls\":" << s.input_stalls
         << ",\"concurrent_push_enqueue\":" << s.concurrent_push_enqueue
-        << ",\"prefill\":" << prefill << ",\"deque_depth\":" << deque_depth << '}';
+        << ",\"prefill\":" << s.initial_prefill << ",\"deque_depth\":" << deque_depth << '}';
 }
 static void tick(Vfades_core& dut) {
     dut.clk = 0; dut.eval();
@@ -115,22 +116,24 @@ static uint32_t random_word(uint32_t& x) {
 static Stats run(Vfades_core& dut, const std::vector<Problem>& problems,
                  const std::string& name, bool stress, std::ofstream& csv) {
     reset(dut);
-    // Fill exactly half of the deque before enabling inference.
-    for (unsigned i = 0; i < prefill; ++i) {
+    // Fill half of the deque, or the whole dataset when it has fewer entries.
+    const unsigned initial_prefill = std::min(prefill, unsigned(problems.size()));
+    for (unsigned i = 0; i < initial_prefill; ++i) {
         dut.input_valid = 1; dut.input_candidates = problems[i].input; dut.eval();
         require(dut.input_ready, "Unexpected prefill backpressure");
         tick(dut);
     }
     dut.input_valid = 0;
-    require(dut.queued == prefill && !dut.busy, "Incorrect half-full starting state");
+    require(dut.queued == initial_prefill && !dut.busy, "Incorrect prefilled starting state");
     std::cout << name << ": prefill=" << dut.queued << '/' << deque_depth << '\n';
-    uint64_t accepted = prefill, returned = 0, finished = 0, previous_finish = 0;
+    uint64_t accepted = initial_prefill, returned = 0, finished = 0, previous_finish = 0;
     uint64_t previous_branches = 0, previous_infer = 0, previous_contradictions = 0;
     uint64_t previous_wasted = 0;
     uint32_t rng = 0x7292048;
     bool held = false, held_solved = false;
     State held_result{};
     Stats s;
+    s.initial_prefill = initial_prefill;
     // Timeout is deliberately independent of the inference monotonicity bound:
     // DFS may revisit many different states before the first solution.
     while (returned < problems.size() && s.cycles < 100000000) {
