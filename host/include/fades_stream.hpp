@@ -1,410 +1,281 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
-#include "fades_ioctl.h"
+#include "fades_device.hpp"
+#include "fades_records.hpp"
 #include <algorithm>
-#include <array>
-#include <cerrno>
 #include <chrono>
-#include <cmath>
-#include <cstdint>
-#include <cstring>
-#include <fcntl.h>
+#include <limits>
+#include <exception>
+#include <memory>
+#include <optional>
 #include <poll.h>
-#include <stdexcept>
-#include <string>
-#include <sys/ioctl.h>
-#include <sys/mman.h>
-#include <unistd.h>
-#if defined(__aarch64__)
-#include <arm_neon.h>
-#endif
+#include <span>
+#include <vector>
+#include <utility>
 
 namespace fades {
 
-/** Monotonic clock used for streaming deadlines and elapsed-time measurements. */
-using Clock = std::chrono::steady_clock;
-
 /**
- * Copy encoded input records to a CPU-owned TX buffer and replace their IDs.
- *
- * Each record is 64 bytes. Payload and reserved bytes are copied unchanged;
- * bytes 0..7 become the little-endian ID first_id + record_index. On AArch64,
- * NEON full-width stores and bounded prefetch avoid a second staging copy and
- * narrow writes to the noncached coherent DMA mapping.
- *
- * @param destination Writable destination containing at least count * 64 bytes.
- * @param source Cached encoded source containing at least count * 64 bytes.
- * @param count Number of records, not bytes. Zero performs no memory accesses.
- * @param first_id ID for the first record; the caller ensures IDs do not wrap
- *                or collide with outstanding requests.
- * @pre Source and destination do not overlap. The destination TX buffer is
- *      CPU-owned: it has not been enqueued, or has been dequeued since enqueue.
+ * Single-threaded fixed-capacity slot interface above Device.
+ * Each submit accepts an entire nonempty span into one free TX slot, or returns
+ * false without copying. Receive lends one full output slot, or an idle tail,
+ * without copying. Its move-only OutputSlot recycles RX on release/destruction.
+ * Slots are independent of input groups; match results by request ID.
+ * This class owns no benchmark timer, input source, callback or CPU oracle.
  */
-inline void copy_records_with_ids(uint8_t* destination, const uint8_t* source,
-                                  unsigned count, uint64_t first_id) {
-    for (unsigned index = 0; index < count; ++index) {
-        const uint8_t* input_record = source + size_t(index) * 64;
-        uint8_t* output_record = destination + size_t(index) * 64;
-        uint64_t request_id = first_id + index;
-#if defined(__aarch64__)
-        if (index + 8 < count) {
-            __builtin_prefetch(source + size_t(index + 8) * 64, 0, 3);
-        }
-        uint64x2_t first_vector = vreinterpretq_u64_u8(vld1q_u8(input_record));
-        first_vector = vsetq_lane_u64(request_id, first_vector, 0);
-        const uint8x16_t second_vector = vld1q_u8(input_record + 16);
-        const uint8x16_t third_vector = vld1q_u8(input_record + 32);
-        const uint8x16_t fourth_vector = vld1q_u8(input_record + 48);
-        vst1q_u8(output_record, vreinterpretq_u8_u64(first_vector));
-        vst1q_u8(output_record + 16, second_vector);
-        vst1q_u8(output_record + 32, third_vector);
-        vst1q_u8(output_record + 48, fourth_vector);
-#else
-        std::array<uint8_t, 64> record;
-        std::memcpy(record.data(), input_record, record.size());
-        for (unsigned byte = 0; byte < 8; ++byte) {
-            record[byte] = uint8_t(request_id >> (8 * byte));
-        }
-        std::memcpy(output_record, record.data(), record.size());
-#endif
-    }
-}
+class SolverStream {
+    /** Keep mappings alive while borrowed output slots exist, even after stream destruction. */
+    struct State {
+        explicit State(const char* path) : device(path) {}
+        Device device;
+        bool closed = false;
+        std::exception_ptr recycle_error;
+    };
 
-/** Return the signed elapsed seconds from begin to end on the monotonic clock. */
-inline double seconds(Clock::time_point begin, Clock::time_point end) {
-    return std::chrono::duration<double>(end - begin).count();
-}
-
-/**
- * Exclusive RAII owner of a FADES fd and its TX/RX mmap regions.
- *
- * Construction opens and maps a usable ABI-v2 device; there is no separate
- * open step or public partially initialized state. Destruction cancels any
- * stream, unmaps memory and closes the fd. Copy and move are disabled.
- *
- * The ABI calls a numbered reusable buffer a "slot": each direction currently
- * has eight 1 MiB buffers. TX and RX buffer indices belong to separate queues;
- * matching indices do not imply matching requests. Results carry request IDs.
- * This class does not track CPU/driver ownership or create worker threads.
- */
-class Device {
 public:
     /**
-     * Open the device, validate INFO and map both coherent DMA regions.
-     * @param path Device node to open exclusively, normally /dev/fades.
-     * @throws std::runtime_error If open, INFO, ABI validation or mmap fails.
-     *         Already acquired mappings/fd are released before rethrowing.
+     * Exclusive, move-only loan of a completed cached RX slot. records() is
+     * valid until release/destruction; do not retain its references afterward.
+     * No allocation/copy occurs per loan. A shared lifetime token keeps mmap
+     * valid if the stream is destroyed first; in that case release does not
+     * requeue into the stopped stream. The loan retains the exclusive fd too;
+     * release it before opening another stream. All operations remain single-threaded.
      */
-    explicit Device(const char* path = "/dev/fades") {
-        descriptor_ = open(path, O_RDWR | O_CLOEXEC);
-        if (descriptor_ < 0) {
-            throw std::runtime_error("Cannot open " + std::string(path) + ": " + std::strerror(errno));
+    class OutputSlot {
+    public:
+        OutputSlot(const OutputSlot&) = delete;
+        OutputSlot& operator=(const OutputSlot&) = delete;
+
+        /** Move ownership of the loan, leaving the source empty. */
+        OutputSlot(OutputSlot&& other) noexcept
+            : state_(std::move(other.state_)), index_(other.index_), records_(std::exchange(other.records_, {})) {}
+
+        /** Return the previous loan, then take ownership of another loan. */
+        OutputSlot& operator=(OutputSlot&& other) noexcept {
+            if (this != &other) {
+                release_noexcept();
+                state_ = std::move(other.state_);
+                index_ = other.index_;
+                records_ = std::exchange(other.records_, {});
+            }
+            return *this;
         }
-        try {
-            if (ioctl(descriptor_, FADES_DMA_INFO, &info_) != 0) {
-                throw std::runtime_error("INFO: " + std::string(std::strerror(errno)));
+
+        /** Return RX automatically; a recycle failure is rethrown by the stream's next I/O/statistics call. */
+        ~OutputSlot() noexcept { release_noexcept(); }
+
+        /** Borrow the actual result records in this slot, with no CPU copy. */
+        std::span<const Record> records() const noexcept { return records_; }
+
+        /** Actual record count; zero after move or release. */
+        size_t size() const noexcept { return records_.size(); }
+
+        /**
+         * Return the slot explicitly and invalidate its views. Idempotent.
+         * @throws std::runtime_error Immediately if QBUF fails; the stream also
+         *         remembers the error so automatic cleanup cannot hide it.
+         */
+        void release() {
+            auto state = std::move(state_);
+            records_ = {};
+            if (state && !state->closed) {
+                try {
+                    state->device.enqueue(FADES_QUEUE_RX, index_);
+                } catch (...) {
+                    state->recycle_error = std::current_exception();
+                    throw;
+                }
             }
-            if (info_.abi_version != FADES_DMA_ABI_VERSION || info_.slots != FADES_DMA_SLOTS ||
-                info_.slot_bytes != FADES_DMA_SLOT_BYTES ||
-                info_.map_bytes != uint64_t(info_.slots) * info_.slot_bytes) {
-                throw std::runtime_error("Unsupported DMA ABI");
-            }
-            void* mapping = mmap(nullptr, info_.map_bytes, PROT_READ | PROT_WRITE,
-                                 MAP_SHARED, descriptor_, 0);
-            if (mapping == MAP_FAILED) {
-                throw std::runtime_error("TX mmap: " + std::string(std::strerror(errno)));
-            }
-            tx_mapping_ = static_cast<uint8_t*>(mapping);
-            mapping = mmap(nullptr, info_.map_bytes, PROT_READ | PROT_WRITE,
-                           MAP_SHARED, descriptor_, info_.map_bytes);
-            if (mapping == MAP_FAILED) {
-                throw std::runtime_error("RX mmap: " + std::string(std::strerror(errno)));
-            }
-            rx_mapping_ = static_cast<uint8_t*>(mapping);
-        } catch (...) {
-            release_resources();
-            throw;
+        }
+
+    private:
+        friend class SolverStream;
+
+        /** Construct a loan only after Device transferred RX ownership to CPU. */
+        OutputSlot(std::shared_ptr<State> state, unsigned index, unsigned count)
+            : state_(std::move(state)), index_(index),
+              records_(reinterpret_cast<const Record*>(state_->device.buffer_data(FADES_QUEUE_RX, index)), count) {}
+
+        /** Defer release errors rather than throwing from a destructor/move assignment. */
+        void release_noexcept() noexcept {
+            try { release(); } catch (...) {}
+        }
+
+        std::shared_ptr<State> state_;
+        unsigned index_;
+        std::span<const Record> records_;
+    };
+
+    /**
+     * Open Device, post RX buffers and start one session.
+     * Slot capacity is fixed at 16,384 records (1 MiB); each direction has
+     * eight buffers. Capacity is not a user-facing runtime parameter.
+     * @throws std::runtime_error On setup failure; Device rolls back resources.
+     */
+    explicit SolverStream(const char* path = "/dev/fades") : state_(std::make_shared<State>(path)) {
+        free_inputs_.reserve(FADES_DMA_SLOTS);
+        for (unsigned index = 0; index < FADES_DMA_SLOTS; ++index) {
+            free_inputs_.push_back(index);
+            state_->device.enqueue(FADES_QUEUE_RX, index);
+        }
+        if (ioctl(state_->device.native_handle(), FADES_STREAMON) != 0) {
+            throw std::runtime_error("STREAMON: " + std::string(std::strerror(errno)));
         }
     }
 
-    Device(const Device&) = delete;
-    Device& operator=(const Device&) = delete;
-    Device(Device&&) = delete;
-    Device& operator=(Device&&) = delete;
+    SolverStream(const SolverStream&) = delete;
+    SolverStream& operator=(const SolverStream&) = delete;
+    SolverStream(SolverStream&&) = delete;
+    SolverStream& operator=(SolverStream&&) = delete;
 
-    /** Best-effort STREAMOFF, munmap and close; cleanup never throws. */
-    ~Device() noexcept {
-        release_resources();
+    /** Stop hardware if loans remain; their mappings stay valid until the last loan is destroyed. */
+    ~SolverStream() noexcept {
+        state_->closed = true;
+        if (state_.use_count() > 1) { ioctl(state_->device.native_handle(), FADES_STREAMOFF); }
     }
 
-    /** Borrow the fd for poll/ioctl; the caller must not close it. */
-    int native_handle() const noexcept {
-        return descriptor_;
-    }
-
-    /** Borrow the validated ABI layout, valid until this Device is destroyed. */
-    const fades_dma_info& info() const noexcept {
-        return info_;
+    /** Copy all inputs unchanged into one slot; caller supplies unique outstanding IDs. */
+    bool try_submit(std::span<const Record> inputs) {
+        validate_submission(inputs.size());
+        reclaim_inputs();
+        if (free_inputs_.empty()) { return false; }
+        unsigned index = free_inputs_.back();
+        std::memcpy(state_->device.buffer_data(FADES_QUEUE_TX, index), inputs.data(), inputs.size_bytes());
+        enqueue_input(index, unsigned(inputs.size()));
+        return true;
     }
 
     /**
-     * Return the mapped start address of one numbered buffer (ABI "slot").
-     * @param queue FADES_QUEUE_TX or FADES_QUEUE_RX.
-     * @param index Buffer number in that queue, in [0, info().slots).
-     * @return Borrowed pointer to info().slot_bytes bytes; valid for this
-     *         Device's lifetime. The pointer does not transfer ownership.
-     * @pre Read/write this memory only while the buffer is CPU-owned.
-     * @throws std::out_of_range If the queue or index is invalid.
+     * Accept all inputs or none, assigning IDs first_id..first_id+size-1 using
+     * the fused copy. On false, no input memory is copied and no IDs are used.
+     * The caller ensures assigned IDs do not wrap or collide.
      */
-    uint8_t* buffer_data(unsigned queue, unsigned index) const {
-        if (queue > FADES_QUEUE_RX || index >= info_.slots) {
-            throw std::out_of_range("Invalid DMA buffer queue/index");
-        }
-        return (queue == FADES_QUEUE_TX ? tx_mapping_ : rx_mapping_) + size_t(index) * info_.slot_bytes;
+    bool try_submit(std::span<const Record> inputs, uint64_t first_id) {
+        validate_submission(inputs.size());
+        reclaim_inputs();
+        if (free_inputs_.empty()) { return false; }
+        unsigned index = free_inputs_.back();
+        copy_records_with_ids(state_->device.buffer_data(FADES_QUEUE_TX, index), inputs[0].data(),
+                              unsigned(inputs.size()), first_id);
+        enqueue_input(index, unsigned(inputs.size()));
+        return true;
     }
 
     /**
-     * Register a CPU-owned buffer with QBUF, without waiting for DMA.
-     * @param queue FADES_QUEUE_TX for input or FADES_QUEUE_RX for empty output.
-     * @param index Buffer number within that queue.
-     * @param records TX input count (1..slot_bytes/64); zero for RX.
-     * @post On success the driver owns this buffer until dequeue or STREAMOFF.
-     * @throws std::runtime_error On ioctl failure; ownership stays with CPU.
+     * Lend one full output slot or completed idle tail without copying. Returns
+     * nullopt when none is ready. Read records() before releasing the loan;
+     * holding all RX slots applies backpressure until a loan is returned.
      */
-    void enqueue(unsigned queue, unsigned index, unsigned records = 0) {
-        fades_buffer buffer{queue, index, records, 0};
-        if (ioctl(descriptor_, FADES_QBUF, &buffer) != 0) {
-            throw std::runtime_error("QBUF: " + std::string(std::strerror(errno)));
+    std::optional<OutputSlot> try_receive() {
+        check_error();
+        fades_buffer buffer{};
+        if (!state_->device.dequeue(FADES_QUEUE_RX, buffer)) { return std::nullopt; }
+        if (!buffer.records || buffer.records > capacity_) {
+            throw std::runtime_error("Invalid RX length");
         }
+        received_ += buffer.records;
+        return OutputSlot(state_, buffer.index, buffer.records);
     }
 
     /**
-     * Try to reclaim one completed buffer with nonblocking DQBUF.
-     * @param queue Completion queue to inspect: FADES_QUEUE_TX or FADES_QUEUE_RX.
-     * @param buffer On success, receives the buffer index and actual count.
-     *               Its contents are unspecified when false is returned.
-     * @return True if ownership transferred to CPU, false for EAGAIN only.
-     *         TX completion permits input reuse; it does not mean solving ended.
-     * @throws std::runtime_error For any ioctl error other than EAGAIN.
+     * Seal further input while keeping receive active. Idle tails flush without
+     * this call; sealing also makes wait() ignore irrelevant TX completions.
      */
-    bool dequeue(unsigned queue, fades_buffer& buffer) {
-        buffer = {queue, 0, 0, 0};
-        if (ioctl(descriptor_, FADES_DQBUF, &buffer) == 0) {
-            return true;
+    void finish_input() {
+        check_error();
+        if (!sealed_) {
+            if (ioctl(state_->device.native_handle(), FADES_END_INPUT) != 0) {
+                throw std::runtime_error("END_INPUT: " + std::string(std::strerror(errno)));
+            }
+            sealed_ = true;
         }
-        if (errno == EAGAIN) {
-            return false;
+    }
+
+    /** Wait for progress, returning false on timeout. Negative timeout means indefinitely. */
+    bool wait(int timeout_ms = -1) {
+        reclaim_inputs();
+        if (!sealed_ && !free_inputs_.empty()) { return true; }
+        return wait_for_events(short(POLLIN | (sealed_ ? 0 : POLLOUT)), timeout_ms);
+    }
+
+    /** Wait only for results while leaving input open for later submissions. */
+    bool wait_for_results(int timeout_ms = -1) {
+        return wait_for_events(POLLIN, timeout_ms);
+    }
+
+    /** Wait for progress no later than a monotonic deadline; false means timeout. */
+    bool wait_until(std::chrono::steady_clock::time_point deadline) {
+        auto remaining = deadline - std::chrono::steady_clock::now();
+        if (remaining <= remaining.zero()) { return false; }
+        auto milliseconds = std::chrono::ceil<std::chrono::milliseconds>(remaining).count();
+        return wait(int(std::min<int64_t>(milliseconds, std::numeric_limits<int>::max())));
+    }
+
+    /** Maximum input size and full output size, in 64-byte records. */
+    unsigned capacity() const noexcept { return capacity_; }
+
+    /** Accepted records whose output loans have not yet been returned to the caller. */
+    uint64_t outstanding() const noexcept { return submitted_ - received_; }
+
+    /** Read cumulative hardware counters without stopping the session or validating them. */
+    fades_solver_stats statistics() const {
+        check_error();
+        fades_solver_stats statistics{};
+        if (ioctl(state_->device.native_handle(), FADES_SOLVER_STATS, &statistics) != 0) {
+            throw std::runtime_error("STATS: " + std::string(std::strerror(errno)));
         }
-        throw std::runtime_error("DQBUF: " + std::string(std::strerror(errno)));
+        return statistics;
     }
 
 private:
-    /** Release fully or partially acquired resources, including on constructor failure. */
-    void release_resources() noexcept {
-        if (tx_mapping_ && rx_mapping_) {
-            ioctl(descriptor_, FADES_STREAMOFF);
-        }
-        if (rx_mapping_) {
-            munmap(rx_mapping_, info_.map_bytes);
-            rx_mapping_ = nullptr;
-        }
-        if (tx_mapping_) {
-            munmap(tx_mapping_, info_.map_bytes);
-            tx_mapping_ = nullptr;
-        }
-        if (descriptor_ >= 0) {
-            close(descriptor_);
-            descriptor_ = -1;
-        }
+    /** Surface a failure from automatic RX recycling at the next observable operation. */
+    void check_error() const {
+        if (state_->recycle_error) { std::rethrow_exception(state_->recycle_error); }
     }
 
-    int descriptor_ = -1;
-    uint8_t* tx_mapping_ = nullptr;
-    uint8_t* rx_mapping_ = nullptr;
-    fades_dma_info info_{};
-};
-
-/** Counts, timings and final hardware snapshot from one drained streaming session. */
-struct StreamingResult {
-    uint64_t submitted_records = 0; ///< Records successfully enqueued as input.
-    uint64_t completed_records = 0; ///< Result records returned through DQBUF(RX).
-    uint64_t completed_packets = 0; ///< Completed RX buffers, not problem count.
-    uint64_t records_observed_before_deadline = 0; ///< Whole RX counts observed by deadline; 0 for untimed runs.
-    double elapsed_seconds = 0; ///< STREAMON through final consumption/recycling, excluding final STATS/STREAMOFF.
-    double drain_seconds = 0; ///< END_INPUT return through final consumption/recycling.
-    double refill_seconds = 0; ///< Input callback time after initial DDR preparation.
-    fades_solver_stats solver_stats{}; ///< Session-cumulative snapshot taken after all results were consumed.
-};
-
-/**
- * Run one continuous, single-threaded input/refill/result/drain loop.
- *
- * Register empty RX buffers and prepare initial TX buffers, STREAMON once,
- * then use one poll fd to recycle completed buffers. Stop new input at the
- * record limit or deadline, END_INPUT, consume all submitted results, snapshot
- * counters, and STREAMOFF. There is no drain/reset between buffers.
- *
- * @tparam WriteInputBuffer Callable void(uint8_t* data, unsigned records,
- *                         uint64_t first_record). It writes exactly records
- *                         encoded inputs into the CPU-owned TX buffer. The
- *                         zero-based first_record is an ordinal, not an ID
- *                         assigned by this function. The callback assigns IDs.
- * @tparam ReadOutputBuffer Callable void(unsigned index, unsigned records).
- *                         It reads/validates records via device.buffer_data(RX,
- *                         index). RX is re-enqueued immediately after return;
- *                         do not retain data references past that return.
- * @param device Open device with all buffers CPU-owned, e.g. after construction
- *               or STREAMOFF. The device remains open on return.
- * @param records_per_buffer Maximum input records per packet; final packet can be shorter.
- * @param buffer_count Number of buffers to use per direction, 1..info().slots.
- * @param record_limit Maximum total input count; zero runs an empty session.
- * @param duration_seconds Positive deadline measured from before STREAMON;
- *                         zero disables the deadline. Callers provide a finite,
- *                         nonnegative duration representable by Clock.
- * @param write_input_buffer Input-producing callback described above.
- * @param read_output_buffer Result-consuming callback described above.
- * @return Session counts, timings and validated final stage/per-core totals.
- * @throws std::runtime_error For invalid dimensions, ioctl/poll failures,
- *         60 seconds without a completion, or inconsistent final PL counts.
- *         Callback exceptions propagate. On failure, destroy Device or call
- *         STREAMOFF before reusing it.
- * @note Both callbacks execute synchronously on the calling thread. Initial
- *       input preparation is excluded from elapsed/refill times; later callback
- *       work and final drain are included. A refill crossing the deadline is
- *       discarded without QBUF. Timed completion counts use RX observation time.
- */
-template<class WriteInputBuffer, class ReadOutputBuffer>
-StreamingResult run_streaming_session(Device& device, unsigned records_per_buffer,
-                                      unsigned buffer_count, uint64_t record_limit,
-                                      double duration_seconds, WriteInputBuffer write_input_buffer,
-                                      ReadOutputBuffer read_output_buffer) {
-    if (!records_per_buffer || records_per_buffer > device.info().slot_bytes / 64 ||
-        !buffer_count || buffer_count > device.info().slots) {
-        throw std::runtime_error("Invalid streaming dimensions");
-    }
-    StreamingResult result;
-    bool input_sealed = false;
-    Clock::time_point input_closed_at;
-    Clock::time_point deadline = Clock::time_point::max();
-    auto prepare_input_buffer = [&](unsigned index) {
-        unsigned records = unsigned(std::min<uint64_t>(records_per_buffer,
-                                                       record_limit - result.submitted_records));
-        if (!records) {
-            return;
-        }
-        auto refill_begin = Clock::now();
-        write_input_buffer(device.buffer_data(FADES_QUEUE_TX, index), records, result.submitted_records);
-        result.refill_seconds += seconds(refill_begin, Clock::now());
-        if (duration_seconds > 0 && Clock::now() >= deadline) {
-            return;
-        }
-        device.enqueue(FADES_QUEUE_TX, index, records);
-        result.submitted_records += records;
-    };
-    for (unsigned index = 0; index < buffer_count; ++index) {
-        device.enqueue(FADES_QUEUE_RX, index);
-    }
-    for (unsigned index = 0; index < buffer_count; ++index) {
-        prepare_input_buffer(index);
-    }
-    result.refill_seconds = 0;
-    const auto session_begin = Clock::now();
-    deadline = session_begin + std::chrono::duration_cast<Clock::duration>(
-        std::chrono::duration<double>(duration_seconds));
-    if (ioctl(device.native_handle(), FADES_STREAMON) != 0) {
-        throw std::runtime_error("STREAMON: " + std::string(std::strerror(errno)));
-    }
-    auto seal_input = [&] {
-        if (ioctl(device.native_handle(), FADES_END_INPUT) != 0) {
-            throw std::runtime_error("END_INPUT: " + std::string(std::strerror(errno)));
-        }
-        input_sealed = true;
-        input_closed_at = Clock::now();
-    };
-    if (result.submitted_records == record_limit) {
-        seal_input();
-    }
-    while (!input_sealed || result.completed_records != result.submitted_records) {
-        if (!input_sealed && duration_seconds > 0 && Clock::now() >= deadline) {
-            seal_input();
-        }
-        fades_buffer buffer{};
-        while (device.dequeue(FADES_QUEUE_RX, buffer)) {
-            if (!buffer.records || buffer.records > records_per_buffer) {
-                throw std::runtime_error("Invalid RX length");
-            }
-            result.completed_records += buffer.records;
-            ++result.completed_packets;
-            if (duration_seconds > 0 && Clock::now() <= deadline) {
-                result.records_observed_before_deadline += buffer.records;
-            }
-            read_output_buffer(buffer.index, buffer.records);
-            device.enqueue(FADES_QUEUE_RX, buffer.index);
-        }
-        if (!input_sealed) {
-            while (device.dequeue(FADES_QUEUE_TX, buffer)) {
-                if (duration_seconds > 0 && Clock::now() >= deadline) {
-                    seal_input();
-                    break;
-                }
-                prepare_input_buffer(buffer.index);
-                if (result.submitted_records == record_limit) {
-                    seal_input();
-                    break;
-                }
-            }
-        }
-        if (input_sealed && result.completed_records == result.submitted_records) {
-            break;
-        }
-        pollfd poll_descriptor{device.native_handle(), short(POLLIN | (input_sealed ? 0 : POLLOUT)), 0};
-        int timeout_ms = 60000;
-        if (!input_sealed && duration_seconds > 0) {
-            double remaining_seconds = seconds(Clock::now(), deadline);
-            timeout_ms = std::clamp(int(std::ceil(std::max(0.0, remaining_seconds) * 1000)), 0, 60000);
-        }
-        int poll_result = poll(&poll_descriptor, 1, timeout_ms);
-        if (poll_result < 0 && errno == EINTR) {
-            continue;
-        }
-        if (poll_result < 0) {
-            throw std::runtime_error("poll: " + std::string(std::strerror(errno)));
-        }
-        if (poll_descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) {
+    /** Poll a selected direction, checking device faults and allowing spurious EINTR wakeups. */
+    bool wait_for_events(short events, int timeout_ms) {
+        check_error();
+        pollfd descriptor{state_->device.native_handle(), events, 0};
+        int result = poll(&descriptor, 1, timeout_ms);
+        if (result < 0 && errno == EINTR) { return true; }
+        if (result < 0) { throw std::runtime_error("poll: " + std::string(std::strerror(errno))); }
+        if (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) {
             throw std::runtime_error("DMA/solver fault");
         }
-        if (!poll_result && !(!input_sealed && duration_seconds > 0 && Clock::now() >= deadline)) {
-            throw std::runtime_error("DMA progress timeout");
+        return result != 0;
+    }
+
+    /** Reject oversized/empty input before testing availability; never partially accept it. */
+    void validate_submission(size_t records) const {
+        if (!records || records > capacity_) {
+            throw std::invalid_argument("Input does not fit one slot");
         }
+        check_error();
+        if (sealed_) { throw std::logic_error("Input is already finished"); }
     }
-    auto session_end = Clock::now();
-    result.elapsed_seconds = seconds(session_begin, session_end);
-    result.drain_seconds = seconds(input_closed_at, session_end);
-    if (ioctl(device.native_handle(), FADES_SOLVER_STATS, &result.solver_stats) != 0) {
-        throw std::runtime_error("STATS: " + std::string(std::strerror(errno)));
+
+    /** Return every DMA-completed input buffer to the free list. */
+    void reclaim_inputs() {
+        check_error();
+        fades_buffer buffer{};
+        while (state_->device.dequeue(FADES_QUEUE_TX, buffer)) { free_inputs_.push_back(buffer.index); }
     }
-    if (ioctl(device.native_handle(), FADES_STREAMOFF) != 0) {
-        throw std::runtime_error("STREAMOFF: " + std::string(std::strerror(errno)));
+
+    /** Transfer a successfully copied TX buffer to Device and account for all its input. */
+    void enqueue_input(unsigned index, unsigned records) {
+        state_->device.enqueue(FADES_QUEUE_TX, index, records);
+        free_inputs_.pop_back();
+        submitted_ += records;
     }
-    for (unsigned index : {0u, 1u, 3u, 4u}) {
-        if (result.solver_stats.counters[index] != result.submitted_records) {
-            throw std::runtime_error("PL stage count mismatch");
-        }
-    }
-    uint64_t dispatched_records = 0;
-    uint64_t collected_records = 0;
-    for (unsigned core = 0; core < 6; ++core) {
-        dispatched_records += result.solver_stats.counters[6 + core];
-        collected_records += result.solver_stats.counters[12 + core];
-        if (result.solver_stats.counters[38 + core] > 2) {
-            throw std::runtime_error("PL inflight limit exceeded");
-        }
-    }
-    if (dispatched_records != result.submitted_records || collected_records != result.submitted_records) {
-        throw std::runtime_error("PL per-core count mismatch");
-    }
-    return result;
-}
+
+    std::shared_ptr<State> state_;
+    static constexpr unsigned capacity_ = FADES_RECORDS_PER_SLOT;
+    std::vector<unsigned> free_inputs_;
+    uint64_t submitted_ = 0;
+    uint64_t received_ = 0;
+    bool sealed_ = false;
+};
 
 } // namespace fades

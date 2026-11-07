@@ -35,6 +35,11 @@ if(FADES_BUILD_DRIVER)
 endif()
 
 if(BUILD_TESTING)
+    # Built everywhere, run explicitly only with a loaded KV260 device.
+    add_executable(solver_stream_board_test tests/solver_stream_board_test.cpp)
+    target_include_directories(solver_stream_board_test PRIVATE include)
+    target_compile_features(solver_stream_board_test PRIVATE cxx_std_20)
+    target_compile_options(solver_stream_board_test PRIVATE -Wall -Wextra -Werror)
     add_executable(stream_helpers_test tests/stream_helpers_test.cpp)
     target_include_directories(stream_helpers_test PRIVATE include)
     target_compile_features(stream_helpers_test PRIVATE cxx_std_20)

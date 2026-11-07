@@ -15,7 +15,9 @@ PS の Linux プログラムから DDR / AXI DMA 経由で問題を投入し、I
 
 FPGA アプリとドライバーをロード済みの KV260 上で実行する。
 時間指定の性能測定、件数指定の正当性確認、packed record のストリーム処理を提供する。
-API は入力・出力それぞれの mmap バッファに QBUF/DQBUF を行う方式。
+API は `SolverStream` で固定容量スロットを一括投入・回収する方式。
+入力は全件受付または受付なし、出力はフルスロットまたは処理完了時の端数を返す。
+その下の `Device` が mmap バッファに QBUF/DQBUF を行う。
 **1つの fd の poll で両方の完了を待ち、1スレッドで継続投入・回収できる。**
 バッファ境界で全件排出・リセットを行わない。ioctl の利用例は [host/README.md](host/README.md)。
 
@@ -36,11 +38,12 @@ build/kv260-ps/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
 
 ```text
 fades_benchmark 問題ファイル 測定秒数
-fades_verify 問題ファイル 1パケットの問題数 DMAスロット数 反復回数 [mixed]
+fades_verify 問題ファイル 1投入の問題数 論理スロット数 反復回数 [mixed]
 fades_stream 入力packed-recordファイル 出力packed-recordファイル [1バッファの問題数]
 ```
 
-**`8193 6 1` の `6` はDMAスロット数であり、コア数ではない。**
+**`8193 6 1` の `6` は検証件数を定める論理スロット数であり、コア数ではない。**
+ユーザー向け `SolverStream` の入出力バッファは16,384問 × 8面に固定する。
 コア数は回路生成時の `FADES_CORES` で指定する。
 `mixed` を付けると、解なし・不正セルを含む入力も検証する。
 
@@ -179,6 +182,7 @@ ctest --test-dir build/host-1core --output-on-failure -L '^fades$'
 | 対象         | 読むファイル                                                        | 役割                                        |
 |--------------|---------------------------------------------------------------------|---------------------------------------------|
 | PS利用       | `host/tools/fades_benchmark.cpp` / `fades_verify.cpp`               | 性能測定 / 解の照合                         |
+| C++接続      | `host/include/fades_stream.hpp` → `fades_device.hpp`              | スロット入出力 → fd・mmap・QBUF/DQBUF      |
 | Linux接続    | `host/include/fades_ioctl.h` → `host/driver/fades.c`                | 公開ABI → バッファ・DMA・制御               |
 | ボード生成   | `fpga/kv260/scripts/build.tcl`                                      | PS・DMA・クロックの接続、実装、出力検査     |
 | PLの入口     | `rtl/fades_axi.sv` → `fades.sv`                                     | 制御 → 供給・ID管理・結果回収・コア群       |
@@ -190,10 +194,16 @@ ctest --test-dir build/host-1core --output-on-failure -L '^fades$'
 
 ## 実測
 
-ABI v2 の継続投入は、入力コピー・ID 更新込みで **27.620716 Mproblem/s**
+ABI v3 の固定スロット・ゼロコピー出力では、**全結果の64 byteをCPUで読む処理込み**で
+**18.753654 Mproblem/s**（10秒の最終確認、187,554,154件、Errors=0）。
+16,384問 × 入出力8面、6コア約115.385 MHz / DMA 187.5 MHz、入力コピー・RX返却・最終排出を含む。
+回路は WNS +0.037 ns / WHS +0.011 ns、BRAM 増加なしで配置配線・実機検証を通過した。
+
+従来の ABI v2 の継続投入は、入力コピー・ID 更新込みで **27.620716 Mproblem/s**
 （10秒×3回の中央値）。180秒で **4,971,960,000件**を処理し Errors=0。
 1万問 × 8面、6コア約115.385 MHz / DMA 187.5 MHz、最終排出を含む。
 測定範囲と検証結果は [host/STREAMING_RESULTS.md](host/STREAMING_RESULTS.md)。
+この旧測定は全出力の CPU 読み出しを含まないため、測定条件が異なる。
 
 以下は旧 ABI v1 の準備済み DDR 反復測定で、測定条件が異なる。
 

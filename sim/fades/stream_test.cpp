@@ -27,25 +27,19 @@ struct Sim {
         d.eval();
     }
     bool dma_edge() const { return (t+1)%(2*dma_half)==dma_half; }
-    void reset() {
+    void reset(unsigned capacity=17) {
         d.reset=1; d.enable=0; d.s_axis_tvalid=0; d.m_axis_tready=0;
-        d.packet_valid=0; d.packet_records=0; d.eval();
+        d.slot_records=capacity; d.submitted_records=0; d.eval();
         for (unsigned i=0;i<180;++i) advance();
         d.reset=0; d.eval();
     }
 };
 static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool stress) {
     auto& d=s.d;
-    s.reset();
+    s.reset(packet);
+    d.submitted_records=ps.size();d.eval();
     const auto start=s.t;
-    unsigned sent=0, beat=0, got=0, obeat=0, commanded=0;
-    unsigned command_index=0, output_packet=0, output_position=0;
-    std::vector<unsigned> lengths;
-    for(unsigned total=0;total<ps.size();) {
-        const unsigned sizes[]={1,17,3,31};
-        unsigned n=std::min<unsigned>(stress ? sizes[lengths.size()%4] : packet,ps.size()-total);
-        lengths.push_back(n);total+=n;
-    }
+    unsigned sent=0, beat=0, got=0, obeat=0;
     Record answer{};
     std::vector<bool> seen(ps.size());
     bool held=false;
@@ -56,10 +50,6 @@ static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool st
         const auto age=s.t-start;
         d.enable=!stress || (age>20000 && s.random()%37!=0);
         if (s.dma_edge()) {
-            if (!d.packet_valid && commanded<ps.size()) {
-                d.packet_records=lengths[command_index];
-                d.packet_valid=1;
-            }
             if (!d.s_axis_tvalid && sent<ps.size() && (!stress || s.random()%4)) {
                 for(unsigned w=0;w<4;++w) d.s_axis_tdata[w]=ps[sent].record[beat*4+w];
                 d.s_axis_tkeep=0xffff;
@@ -77,11 +67,10 @@ static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool st
             if(held) { for(unsigned w=0;w<4;++w) held_data[w]=d.m_axis_tdata[w]; held_last=d.m_axis_tlast; }
             bool tx=d.s_axis_tvalid && d.s_axis_tready;
             bool rx=d.m_axis_tvalid && d.m_axis_tready;
-            bool command=d.packet_valid && d.packet_ready;
             if(rx) {
                 check(d.m_axis_tkeep==0xffff,"Bad output keep");
                 for(unsigned w=0;w<4;++w) answer[obeat*4+w]=d.m_axis_tdata[w];
-                check(bool(d.m_axis_tlast)==(obeat==3 && output_position+1==lengths[output_packet]),"Bad packet boundary");
+                check(bool(d.m_axis_tlast)==(obeat==3 && (got%packet+1==packet || got+1==ps.size())),"Bad packet boundary");
                 if(++obeat==4) {
                     obeat=0;
                     uint64_t rid=uint64_t(answer[0]) | uint64_t(answer[1])<<32;
@@ -102,11 +91,9 @@ static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool st
                     } else for(unsigned c=0;c<81;++c) check(nibble(answer,72+4*c)==0,"Nonzero unsolved cells");
                     for(unsigned b=396;b<512;++b) check(((answer[b/32]>>(b%32))&1)==0,"Reserved bits nonzero");
                     ++got;
-                    if(++output_position==lengths[output_packet]) {output_position=0;++output_packet;}
                 }
             }
             s.advance();
-            if(command) {commanded+=d.packet_records;++command_index;d.packet_valid=0;d.eval();}
             if(tx) { d.s_axis_tvalid=0; if(++beat==4) {beat=0; ++sent;} d.eval(); }
         } else s.advance();
         check(!d.framing_error,"Unexpected framing error");
@@ -134,6 +121,103 @@ static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool st
     std::cout<<"PASS "<<ps.size()<<" records, stress="<<stress<<", time steps="<<s.t-start
              <<", processing_cycles="<<d.processing_cycles<<", core_busy_cycles="<<sum_busy<<'\n';
 }
+// Two six-record inputs merge into 10+2 output slots. Register more work while
+// the short slot's TLAST is stalled, then resume again after a fully idle gap.
+static void run_idle_and_resume(Sim& s, const Problem& problem) {
+    auto& d=s.d;
+    s.reset(10);d.enable=1;d.submitted_records=12;
+    unsigned sent=0, input_beat=0, got=0, output_beat=0, packet_size=0;
+    unsigned allowed=12, stall_cycles=0, idle_cycles=0;
+    bool extended=false, held=false;
+    std::array<uint32_t,4> held_data{};
+    unsigned held_last=0;
+    Record answer{};
+    std::vector<unsigned> packets;
+    std::vector<bool> seen(20);
+    const auto start=s.t;
+    while(got<20) {
+        check(s.t-start<10000000,"Idle/resume timeout");
+        if(s.dma_edge()) {
+            if(!d.s_axis_tvalid && sent<allowed) {
+                Record input=problem.record;
+                input[0]=sent;input[1]=0;
+                for(unsigned w=0;w<4;++w)d.s_axis_tdata[w]=input[4*input_beat+w];
+                d.s_axis_tkeep=0xffff;
+                d.s_axis_tlast=input_beat==3 && (sent==5 || sent+1==allowed);
+                d.s_axis_tvalid=1;
+            }
+            d.eval();
+            if(!extended && got==11 && output_beat==3 && d.m_axis_tvalid) {
+                check(d.m_axis_tlast,"Idle tail not marked");
+                extended=true;allowed=17;d.submitted_records=17;stall_cycles=200;
+            }
+            d.m_axis_tready=stall_cycles==0;
+            if(stall_cycles)--stall_cycles;
+            d.eval();
+            if(held) {
+                check(d.m_axis_tvalid && held_last==d.m_axis_tlast,"Idle TLAST changed after credit update");
+                for(unsigned w=0;w<4;++w)check(held_data[w]==d.m_axis_tdata[w],"Idle data changed under stall");
+            }
+            held=d.m_axis_tvalid && !d.m_axis_tready;
+            if(held) {
+                held_last=d.m_axis_tlast;
+                for(unsigned w=0;w<4;++w)held_data[w]=d.m_axis_tdata[w];
+            }
+            bool tx=d.s_axis_tvalid && d.s_axis_tready;
+            bool rx=d.m_axis_tvalid && d.m_axis_tready;
+            if(rx) {
+                for(unsigned w=0;w<4;++w)answer[4*output_beat+w]=d.m_axis_tdata[w];
+                if(++output_beat==4) {
+                    output_beat=0;++packet_size;++got;
+                    check(answer[1]==0 && answer[0]<20 && !seen[answer[0]],"Idle/resume ID mismatch");
+                    seen[answer[0]]=true;
+                    if(d.m_axis_tlast) {packets.push_back(packet_size);packet_size=0;}
+                }
+            }
+            if(got==17 && allowed==17 && ++idle_cycles==500) {
+                check(!d.m_axis_tvalid,"Unexpected output in idle gap");
+                allowed=20;d.submitted_records=20;
+            }
+            s.advance();
+            if(tx) {d.s_axis_tvalid=0;if(++input_beat==4){input_beat=0;++sent;}d.eval();}
+        } else s.advance();
+    }
+    check(packets==std::vector<unsigned>({10,2,5,3}),"Incorrect full/idle output slots");
+    check(d.accepted_count==20 && d.output_count==20,"Idle/resume counters");
+    std::cout<<"PASS fixed slots: 6+6 -> 10+2, frozen TLAST, idle/resume 5+3\n";
+}
+
+// Seed only the exported output counter near 2^32 to exercise the comparator
+// across its carry without simulating billions of Sudoku requests.
+static void run_counter_carry(Sim& s, const Problem& problem) {
+    auto& d=s.d;
+    s.reset(10);d.enable=1;
+    for(unsigned cycle=0;cycle<100;++cycle)s.advance(); // Let local reset release before seeding.
+    d.output_count=0xfffffffcULL;
+    d.submitted_records=0x100000004ULL;
+    unsigned sent=0, input_beat=0, got=0, output_beat=0;
+    const auto start=s.t;
+    while(got<8) {
+        check(s.t-start<1000000,"64-bit output comparator timeout");
+        if(s.dma_edge()) {
+            if(!d.s_axis_tvalid && sent<8) {
+                for(unsigned w=0;w<4;++w)d.s_axis_tdata[w]=problem.record[4*input_beat+w];
+                d.s_axis_tkeep=0xffff;d.s_axis_tlast=input_beat==3;d.s_axis_tvalid=1;
+            }
+            d.m_axis_tready=1;d.eval();
+            bool tx=d.s_axis_tvalid && d.s_axis_tready;
+            if(d.m_axis_tvalid) {
+                check(bool(d.m_axis_tlast)==(output_beat==3 && got==7),"64-bit idle tail mismatch");
+                if(++output_beat==4) {output_beat=0;++got;}
+            }
+            s.advance();
+            if(tx) {d.s_axis_tvalid=0;if(++input_beat==4){input_beat=0;++sent;}d.eval();}
+        } else s.advance();
+    }
+    check(d.output_count==0x100000004ULL,"Output counter lost carry");
+    std::cout<<"PASS 64-bit output/registered-total comparison across 2^32\n";
+}
+
 int main(int argc,char** argv) try {
     Verilated::commandArgs(argc,argv);
     std::ifstream f(argc>1?argv[1]:"sim/data/17puz49158.txt");
@@ -164,7 +248,7 @@ int main(int argc,char** argv) try {
     Sim s;
     run(s,stress,17,true);
     // Reset with an incomplete input and unconsumed output in flight.
-    s.reset(); s.d.packet_valid=1;s.d.packet_records=7;s.d.enable=1;s.d.s_axis_tvalid=1;s.d.s_axis_tkeep=0xffff;s.d.s_axis_tlast=0;
+    s.reset(7); s.d.submitted_records=1000;s.d.enable=1;s.d.s_axis_tvalid=1;s.d.s_axis_tkeep=0xffff;s.d.s_axis_tlast=0;
     for(unsigned w=0;w<4;++w)s.d.s_axis_tdata[w]=0;
     for(unsigned i=0;i<10000;++i) s.advance();
     check(s.d.m_axis_tvalid && s.d.output_count==0,"Reset case did not contain stalled results");
@@ -177,6 +261,8 @@ int main(int argc,char** argv) try {
         check(s.d.framing_error && !s.d.s_axis_tready && s.d.accepted_count==0,"Framing fault handling failed");
     }
     run(s,std::vector<Problem>{ps.front()},1,false);
+    run_idle_and_resume(s,solved);
+    run_counter_carry(s,solved);
     Sim slow;slow.dma_half=7;
     run(slow,stress,23,true);
     return 0;

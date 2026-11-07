@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-board ABI v2 tests: mixed packets, ring wrap, ownership, stalls, reset."""
+"""Real-board fixed-slot tests: merging, idle tails, SG wrap, stalls, restart."""
 import errno
 import fcntl
 import mmap
@@ -16,7 +16,8 @@ INFO_CMD = (2 << 30) | (INFO.size << 16) | BASE
 QBUF = (1 << 30) | (BUF.size << 16) | BASE | 3
 DQBUF = (3 << 30) | (BUF.size << 16) | BASE | 4
 STATS = (2 << 30) | (352 << 16) | BASE | 2
-ON, END, OFF = BASE | 5, BASE | 6, BASE | 7
+ON = BASE | 5
+END, OFF = BASE | 6, BASE | 7
 DIGITS = "534678912672195348198342567859761423426853791713924856961537284287419635345286179"
 CELLS = sum(int(d) << (4 * i) for i, d in enumerate(DIGITS))
 
@@ -37,12 +38,19 @@ def main():
         info = bytearray(INFO.size)
         fcntl.ioctl(fd, INFO_CMD, info, True)
         version, slots, stride, _, size = INFO.unpack(info)
-        assert version == 2
+        assert version == 3
         tx = mmap.mmap(fd, size, flags=mmap.MAP_SHARED)
         rx = mmap.mmap(fd, size, flags=mmap.MAP_SHARED, offset=size)
 
         def queue(q, index, records=0):
+            if q == 1:
+                # Dirty every cached RX line while CPU-owned. Reuse must clean
+                # before DMA and invalidate before returning fresh results.
+                rx[index * stride:(index + 1) * stride] = b"\xa5" * stride
             fcntl.ioctl(fd, QBUF, BUF.pack(q, index, records, 0))
+
+        def start():
+            fcntl.ioctl(fd, ON)
 
         def dequeue(q):
             b = bytearray(BUF.pack(q, 0, 0, 0))
@@ -55,23 +63,52 @@ def main():
                 raise
 
         # No input, clean finish, then restart without module/FPGA reload.
-        fcntl.ioctl(fd, ON)
-        expect_errno(errno.EBUSY, lambda: fcntl.ioctl(fd, ON))
+        start()
+        expect_errno(errno.EBUSY, start)
         fcntl.ioctl(fd, END)
         expect_errno(errno.EPIPE, lambda: queue(0, 0, 1))
         fcntl.ioctl(fd, OFF)
 
         # Queued input must wait for RX capacity. STREAMOFF cancels it.
         queue(0, 0, 1)
-        fcntl.ioctl(fd, ON)
+        start()
         poll = select.poll()
         poll.register(fd, select.POLLOUT)
         assert not poll.poll(20), "TX ran without an RX reservation"
         fcntl.ioctl(fd, OFF)
 
+        # Register both inputs before START: output must merge to 16384+1616.
+        # No END_INPUT is needed to return the short slot. Then resume with 3
+        # records in the same session and observe another idle tail.
+        data = (struct.pack("<Q", 0) + CELLS.to_bytes(41, "little") + bytes(15))
+        for i in range(2):
+            tx[i * stride:i * stride + 9000 * 64] = data * 9000
+            queue(0, i, 9000)
+        for i in range(slots):
+            queue(1, i)
+        start()
+        poll.modify(fd, select.POLLIN)
+        sizes = []
+        while sum(sizes) < 18000:
+            assert poll.poll(1000), "Merged-slot timeout"
+            while (done := dequeue(1)) is not None:
+                index, n = done
+                sizes.append(n)
+                queue(1, index)
+        assert sizes == [16384, 1616], sizes
+        expect_errno(errno.EINVAL, lambda: queue(0, 2, 16385))
+        while dequeue(0) is not None:
+            pass
+        time.sleep(0.01)
+        tx[:3 * 64] = data * 3
+        queue(0, 0, 3)
+        assert poll.poll(1000), "Idle resume timeout"
+        index, n = dequeue(1)
+        assert n == 3
+        fcntl.ioctl(fd, OFF)
+
         lengths = [1, 7, 10000, 16384, 31, 3] * 16 + [19]
         total = sum(lengths)
-        expected_packets = sorted(lengths)
         seen = bytearray(total)
         submitted = received = next_packet = 0
         sealed = False
@@ -106,7 +143,7 @@ def main():
         for i in range(slots):
             queue(1, i)
             submit(i)
-        fcntl.ioctl(fd, ON)
+        start()
         while not sealed or received != submitted:
             poll.modify(fd, select.POLLIN | (0 if sealed else select.POLLOUT))
             events = poll.poll(10000)
@@ -143,7 +180,7 @@ def main():
                     if sealed:
                         break
         assert received == total and all(seen)
-        assert sorted(packet_lengths) == expected_packets
+        assert sum(packet_lengths) == total and all(0 < n <= 16384 for n in packet_lengths)
         stats = bytearray(352)
         fcntl.ioctl(fd, STATS, stats, True)
         counts = struct.unpack("=44Q", stats)
@@ -154,12 +191,12 @@ def main():
         # Reset with active work and unread results, then run an empty session.
         queue(1, 0)
         queue(0, 0, 10000)
-        fcntl.ioctl(fd, ON)
+        start()
         fcntl.ioctl(fd, OFF)
-        fcntl.ioctl(fd, ON)
+        start()
         fcntl.ioctl(fd, END)
         fcntl.ioctl(fd, OFF)
-        print(f"PASS: {total} IDs, {len(lengths)} variable packets, SG wrap, RX starvation, cancel/restart")
+        print(f"PASS: 9000+9000 -> 16384+1616 and idle resume; {total} IDs, {len(packet_lengths)} output slots, dirty cached RX reuse, SG wrap, RX starvation, cancel/restart")
     finally:
         fcntl.ioctl(fd, OFF)
         if rx is not None:

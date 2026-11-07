@@ -1,4 +1,92 @@
-# ABI v2 streaming validation — 2026-11-07
+# Streaming validation
+
+## ABI v3: fixed slots and zero-copy output — 2026-11-08 JST
+
+Public slots are fixed at **16,384 records (1 MiB), eight per direction**.
+Input submission accepts all records or none. Output combines independent input
+groups and ends at capacity or the last registered result while idle. A short
+slot does not seal input. TX credits include work still waiting in the host/DMA;
+the final-beat marker is frozen before backpressure can expose it.
+
+`SolverStream::try_receive()` returns a move-only RX loan. Applications read
+the cached mapping directly; release/destruction requeues the slot. A lifetime
+token keeps mappings/fd valid if a loan outlives its stream, while DMA is stopped.
+The class contains no benchmark deadline, input source or validation callback.
+
+### Hardware
+
+KV260 revB, six cores at 115,384,615 Hz, DMA requested 187.5 MHz, 128-bit AXI,
+64-byte records; Ubuntu 24.04.5, kernel 6.8.0-1015-xilinx. Native tools use
+GCC 13.3.0 Release with Cortex-A53 scheduling. Vivado 2026.1 standard CMake build
+and firmware checks passed: **WNS +0.037 ns / WHS +0.011 ns**, TNS/THS zero,
+reviewed CDC/skew/DRC and fan TTC0 wave[2] → EMIO → A12 preserved.
+Final utilization: **90,856 LUT (77.58%), 37,380 FF (15.96%), 14,052 CLB
+(95.98%), 128 BRAM tiles (88.89%)**. No additional BRAM was needed.
+
+### Final measurement scope and result
+
+```sh
+build/kv260-ps/host/fades_benchmark sim/data/17puz49158.txt 10
+```
+
+The final check completed **187,554,154 requests in 10.000939 seconds**:
+**18.753654 Mproblem/s**, with a **0.000785-second** final drain and Errors=0.
+Every timed result's entire **64 bytes** is read into an observable additive
+checksum (3006349485991893908), before returning its RX slot. Timing includes
+input copying/unique ID updates, DMA, solving, all-result reads, RX recycling,
+kernel cache synchronization and final drain. There is **no output copy**.
+
+File parsing/encoding, CPU reference preparation, device setup and independent
+pre/post correctness sessions are excluded. Pre/post sessions each checked
+**131,072 unique IDs**, status, Sudoku constraints, hints and reserved bits.
+Timed results are consumed into the checksum rather than fully Sudoku-validated;
+DMA lengths and final cumulative stage/per-core counts are also checked.
+The file is cycled; counts include repeated requests. This is one final
+10-second check, not a three-run median. No new dmesg messages occurred.
+
+Historical 27.62 Mproblem/s measurements below did not read all timed results on
+the CPU and therefore have a different scope.
+
+### Read-path investigation (intermediate implementations)
+
+|Read path|Mproblem/s|Scope|
+|---|---:|---|
+|Noncached RX + ordinary copy|2.585965|All output copied to application buffers|
+|Noncached RX + four-vector load|1.092022|All output copied; rejected|
+|Cached RX + ordinary copy|14.907604|All output copied|
+|Cached RX + NEON/prefetch copy|16.806529|All output copied; median of 3 runs|
+|RX loans + all-byte additive checksum|18.753654|Final zero-copy API, all output read|
+
+RX uses `dma_alloc_pages` / `dma_mmap_pages`, with bidirectional DMA ownership
+synchronization before transfer, after actual completion, and after cancellation.
+This permits cacheable CPU reads without userspace cache maintenance or falsely
+declaring the noncoherent HP ports coherent. TX and SG descriptors retain their
+coherent allocation. The copied-output intermediate also passed a 60-second
+run of 1,011,851,882 requests, but that is not the final zero-copy measurement.
+
+### Validation
+
+- RTL full-set/Hard stream tests, AXI-Lite and lint passed, including merged
+  output, short idle tails, resumed input and stable stalled TLAST after new
+  credits. Directed tests crossed 2^32 for credit accumulation and output comparison.
+- Host CTests passed on x86 and Arm: constructor rollback, slot all-or-none,
+  zero-copy pointer identity, move/replacement/exactly-once return, loans that
+  outlive their stream, and deferred automatic-recycling errors.
+- Raw ABI and real-board tests: **9,000+9,000 → 16,384+1,616**, idle resume
+  without END_INPUT, 422,835 mixed IDs, dirty cached RX reuse, SG wrap,
+  RX starvation, cancellation and restart.
+- Public class test: **280,147 unique IDs**, borrowed RX slots, oversized/busy
+  submissions, automatic return, idle tails and resumed input/backpressure.
+- ioctl file example: **400,005 records**, final short slot, empty/truncated file.
+- Final zero-copy verifier: warmup 49,158 + continuous **147,474** full-set
+  results; Hard 375 mixed (311 solved, 32 unsatisfiable, 32 invalid), warmup
+  and measured sessions. Every answer/ID was checked against the CPU reference.
+- Native kernel module build and Kbuild W=1 passed.
+
+Local logs: `results/streaming16/fixed-slots-loan-final.log` (final),
+`fixed-slots-final.log` (copied-output checks), and the read-path trial logs.
+
+## Historical ABI v2 streaming validation — 2026-11-07
 
 ## Configuration and measurement scope
 

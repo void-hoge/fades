@@ -2,6 +2,7 @@
 #include "fades_stream.hpp"
 #include <cstdarg>
 #include <iostream>
+#include <vector>
 
 namespace {
 
@@ -18,6 +19,10 @@ struct MockDevice {
     int queue_error = 0;
     int dequeue_error = EAGAIN;
     fades_buffer last_enqueued{};
+    unsigned enqueue_calls = 0;
+    unsigned streamon_calls = 0;
+    std::array<void*, 2> mappings{};
+    std::array<std::vector<fades_buffer>, 2> completions;
 };
 
 MockDevice mock;
@@ -70,6 +75,10 @@ extern "C" int __wrap_ioctl(int, unsigned long command, ...) {
         ++mock.streamoff_calls;
         return 0;
     }
+    if (command == FADES_STREAMON) {
+        ++mock.streamon_calls;
+        return 0;
+    }
     va_list arguments;
     va_start(arguments, command);
     fades_dma_info* info = nullptr;
@@ -96,7 +105,14 @@ extern "C" int __wrap_ioctl(int, unsigned long command, ...) {
             return -1;
         }
         mock.last_enqueued = *buffer;
+        ++mock.enqueue_calls;
     } else if (command == FADES_DQBUF) {
+        auto& completions = mock.completions[buffer->queue];
+        if (!completions.empty()) {
+            *buffer = completions.front();
+            completions.erase(completions.begin());
+            return 0;
+        }
         if (mock.dequeue_error) {
             errno = mock.dequeue_error;
             return -1;
@@ -118,6 +134,7 @@ extern "C" void* __wrap_mmap(void*, size_t length, int, int, int, off_t) {
                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (mapping != MAP_FAILED) {
         ++mock.active_mappings;
+        mock.mappings[mock.mapping_attempts - 1] = mapping;
     }
     return mapping;
 }
@@ -182,6 +199,100 @@ int main() try {
            "Destructor leaked resources");
     expect(mock.streamoff_calls == 1, "Destructor did not stop its stream exactly once");
 
+    mock = {};
+    {
+        fades::SolverStream solver("/mock/fades");
+        expect(solver.capacity() == 16384 && mock.streamon_calls == 1, "Fixed slot stream was not started");
+        std::array<fades::Record, 3> inputs{};
+        inputs[0][8] = 5;
+        expect(solver.try_submit(inputs, 100), "First complete slot was not accepted");
+        expect(solver.outstanding() == 3, "Submitted count was not tracked");
+        const unsigned first_index = mock.last_enqueued.index;
+        for (unsigned index = 1; index < FADES_DMA_SLOTS; ++index) {
+            expect(solver.try_submit(inputs, 100 + 3 * index), "Initial free slot was unavailable");
+        }
+        expect(!solver.try_submit(inputs, 200), "Busy slot accepted a second input");
+        const auto* tx = static_cast<const uint8_t*>(mock.mappings[0]) + first_index * FADES_DMA_SLOT_BYTES;
+        expect(tx[0] == 100 && tx[8] == 5, "Busy submission changed DMA memory");
+        bool oversized_failed = false;
+        try {
+            std::vector<fades::Record> oversized(solver.capacity() + 1);
+            solver.try_submit(oversized);
+        } catch (const std::invalid_argument&) {
+            oversized_failed = true;
+        }
+        expect(oversized_failed, "Oversized input did not fail when all slots were busy");
+        expect(!solver.try_receive(), "Empty receive queue returned results");
+        std::memcpy(mock.mappings[1], inputs.data(), sizeof(inputs));
+        mock.completions[FADES_QUEUE_RX].push_back({FADES_QUEUE_RX, 0, 3, 0});
+        auto output = solver.try_receive();
+        expect(output && output->size() == 3 && output->records()[0][8] == 5,
+               "Idle tail was not returned as an RX loan");
+        expect(output->records().data() == mock.mappings[1], "Receive copied instead of lending DMA memory");
+        const auto enqueue_calls = mock.enqueue_calls;
+        auto moved = std::move(*output);
+        output.reset();
+        expect(mock.enqueue_calls == enqueue_calls, "Moving a loan recycled it early");
+        moved.release();
+        expect(mock.enqueue_calls == enqueue_calls + 1 && solver.outstanding() == 21 &&
+               mock.last_enqueued.queue == FADES_QUEUE_RX, "Loan release did not recycle exactly once");
+        moved.release();
+        expect(mock.enqueue_calls == enqueue_calls + 1, "Duplicate loan release");
+        mock.completions[FADES_QUEUE_RX].push_back({FADES_QUEUE_RX, 1, 1, 0});
+        mock.completions[FADES_QUEUE_RX].push_back({FADES_QUEUE_RX, 2, 1, 0});
+        auto first_loan = solver.try_receive();
+        auto second_loan = solver.try_receive();
+        const auto before_assignment = mock.enqueue_calls;
+        *first_loan = std::move(*second_loan);
+        second_loan.reset();
+        expect(mock.enqueue_calls == before_assignment + 1, "Move assignment lost/recycled the wrong loan");
+        first_loan.reset();
+        expect(mock.enqueue_calls == before_assignment + 2, "Replaced loan was not returned exactly once");
+        mock.completions[FADES_QUEUE_TX].push_back({FADES_QUEUE_TX, 0, 3, 0});
+        expect(solver.try_submit(inputs), "Completed input slot was not reusable");
+        solver.finish_input();
+        bool sealed_failed = false;
+        try {
+            solver.try_submit(inputs);
+        } catch (const std::logic_error&) {
+            sealed_failed = true;
+        }
+        expect(sealed_failed, "Sealed stream accepted input");
+    }
+    expect(!mock.active_descriptors && !mock.active_mappings, "SolverStream leaked Device resources");
+
+    // A loan may outlive its stream: stop DMA, keep mappings, never requeue it.
+    mock = {};
+    std::optional<fades::SolverStream::OutputSlot> held;
+    {
+        fades::SolverStream solver("/mock/fades");
+        std::array<fades::Record, 1> input{};
+        solver.try_submit(input);
+        mock.completions[FADES_QUEUE_RX].push_back({FADES_QUEUE_RX, 0, 1, 0});
+        held = solver.try_receive();
+    }
+    expect(mock.active_descriptors == 1 && mock.active_mappings == 2 && mock.streamoff_calls == 1,
+           "Stream destruction invalidated a live output view or left DMA running");
+    auto enqueue_calls = mock.enqueue_calls;
+    held.reset();
+    expect(!mock.active_descriptors && !mock.active_mappings && mock.enqueue_calls == enqueue_calls,
+           "Late loan destruction requeued stopped DMA or leaked mappings");
+
+    // Automatic recycling cannot throw; its failure must surface on the next operation.
+    mock = {};
+    {
+        fades::SolverStream solver("/mock/fades");
+        std::array<fades::Record, 1> input{};
+        solver.try_submit(input);
+        mock.completions[FADES_QUEUE_RX].push_back({FADES_QUEUE_RX, 0, 1, 0});
+        auto output = solver.try_receive();
+        mock.queue_error = EIO;
+        output.reset();
+        bool recycle_failed = false;
+        try { solver.try_receive(); } catch (const std::runtime_error&) { recycle_failed = true; }
+        expect(recycle_failed, "Destructor hid RX recycling failure");
+    }
+
     std::array<uint8_t, 3 * 64> source{};
     std::array<uint8_t, 3 * 64> destination{};
     for (size_t index = 0; index < source.size(); ++index) {
@@ -201,7 +312,7 @@ int main() try {
         }
     }
     fades::copy_records_with_ids(nullptr, nullptr, 0, 0);
-    std::cout << "PASS: constructor rollback, RAII, queue errors and record copy\n";
+    std::cout << "PASS: constructor rollback, RAII, atomic slots, RX loans/lifetime, queue errors and record copy\n";
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "FAIL: " << error.what() << '\n';

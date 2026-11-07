@@ -1,7 +1,7 @@
 # PS / Linux ソフトウェア
 
-ABI v2 は **入力用と出力用の2つのバッファキューを1つの poll fd で管理する**。
-各キューは mmap バッファを QBUF / DQBUF で循環させ、1スレッドで継続処理できる。
+入力用と出力用の2つのバッファキューを1つの poll fd で管理する。
+`SolverStream` は固定容量のスロットで問題を一括投入・回収する、1スレッド用のクラス。
 
 ## ビルド
 
@@ -13,162 +13,159 @@ cmake --build --preset kv260-ps
 ctest --preset kv260-ps
 ```
 
-必要ツールは CMake 3.25以降、Ninja、C++20、Python 3、build-essential と
-実行中カーネルのヘッダー。`-DFADES_KERNEL_BUILD=/path/to/headers` で変更できる。
-開発機では `host` プリセットを使う。ドライバーは実機でネイティブビルドする。
+CMake 3.25以降、Ninja、C++20、Python 3、build-essential、実行中カーネルのヘッダーが必要。
+`-DFADES_KERNEL_BUILD=/path/to/headers` でヘッダーを指定できる。
+開発機のビルド・テストは `host` プリセット。実機用は Cortex-A53 向けにコンパイルする。
 
-## ioctl で書く
+## ユーザー向け API: SolverStream
 
-公開定義は [`include/fades_ioctl.h`](include/fades_ioctl.h)。
-[`tools/fades_stream.cpp`](tools/fades_stream.cpp) は実行可能な1スレッドの ioctl 例。
-open/INFO/mmap/終了処理の RAII だけを共通ヘルパーに任せ、QBUF/DQBUF/poll は明示している。
+```cpp
+#include "fades_stream.hpp"
 
-### 1. open・INFO・mmap
+fades::SolverStream solver;           // 16,384問 × 入出力8面に固定
 
-`/dev/fades` を O_RDWR で open し、`FADES_DMA_INFO` を取得する。
-ABI version は **2**。旧 RUN ABI は廃止した。
+// inputs は通常メモリー上のエンコード済み問題。1〜capacity()問。
+bool accepted = solver.try_submit(inputs);
+// または、コピー時にIDを first_id, first_id+1, ... に置換する。
+bool accepted_with_ids = solver.try_submit(inputs, first_id);
+
+// 完成した1スロットを借りる。未完成なら nullopt。出力コピーはしない。
+if (auto output = solver.try_receive()) {
+    consume(output->records());       // span<const Record> を読む
+}                                    // RAIIでRXへ返却する
+```
+
+### スロットの契約
+
+slot は循環させるバッファ1面の意味。容量 N は16,384問（1 MiB）固定、入出力各8面。
+
+- **入力**: 1〜N 問を空きスロットへ全件コピーし、投入して true を返す。
+  空きがなければ入力をコピー・投入せず false。一部だけ受け付けることはない。
+  N 問を超える入力・空入力は、空きの有無によらずエラー。
+- **出力**: N 件でフルになったスロット、または受け付け済みの処理がすべて完了した時点の
+  端数スロットを返す。それ以外は nullopt。
+- `try_receive()` はキャッシュ可能な RX スロットの **move-only な `OutputSlot`** を返す。
+  追加コピーは行わない。`records()` は実件数分の読み取り専用 span、`size()` は件数。
+  オブジェクト破棄または `release()` で RX に再登録する。返却後の参照は使わない。
+  長期保持したい結果だけ、呼び出し側で通常メモリーへコピーする。
+- 複数スロットを保持できるが、全 RX を保持すれば返却まで背圧がかかる。
+  Stream を先に破棄した場合は DMA を停止し、借りたスロットがなくなるまで fd と mmap を保持する。
+  その間は排他的 open も維持する。全操作は1スレッドで使う。
+- `release()` は再登録失敗を例外で返す。デストラクタは例外を投げず、失敗を次の Stream の
+  I/O・統計取得時に通知する。セルのデコード・解検証はこのクラスでは行わない。
+- 入出力の区切りは独立。例えば6千問＋6千問を処理継続中に投入すれば、出力は1万件＋端数2千件。
+  ID で結果を対応付ける。入力バッファ番号と出力バッファ番号は対応しない。
+- 「処理完了」は、ホストや DMA 内で送信待ちの入力も含めた全登録件数に対して判定する。
+  入力 FIFO が一時的に空でも端数にはしない。端数境界を確定した後に追加入力されても境界は保持する。
+- アイドルの端数を取り出した後も入力を追加できる。reset や `finish_input()` は不要。
+
+### 待機・終了
+
+- `wait(timeout_ms)` は入力の空き／完了か出力到着を待つ。負値は無期限。
+- `wait_until(deadline)` は steady_clock の期限まで待つ。
+- `wait_for_results(timeout_ms)` は出力だけを待つ。入力は後から追加できる。
+- `finish_input()` は以後の投入を締め切る。端数を返すための操作ではない。
+  締め切り後の `wait` は出力だけを待ち、TX 完了による busy loop を避ける。
+- `outstanding()` は投入件数 − アプリへスロットとして渡した結果件数。保持中のスロットは含まない。
+- デストラクタで停止・キャンセル・資源解放する。
+- `statistics()` は累積 PL カウンターを返す。内容の検査・時間計測は呼び出し側の責務。
+
+典型的な有限入力のループ:
+
+```cpp
+size_t next = 0;
+while (next < problems.size() || solver.outstanding()) {
+    auto output = solver.try_receive();
+    bool received = output.has_value();
+    if (output) {
+        consume(output->records());
+        output->release();            // 返却エラーをその場で確認したい場合
+    }
+
+    bool accepted = false;
+    if (next < problems.size()) {
+        auto inputs = std::span(problems).subspan(next);
+        inputs = inputs.first(std::min(inputs.size(), size_t(solver.capacity())));
+        accepted = solver.try_submit(inputs, next);
+        if (accepted) next += inputs.size();
+        if (next == problems.size()) solver.finish_input();
+    }
+    if (!received && !accepted) solver.wait();
+}
+```
+
+## ファイルの責務
+
+|ファイル|責務|
+|---|---|
+|`include/fades_ioctl.h`|カーネルと共有する ABI 構造体・ioctl 番号|
+|`include/fades_device.hpp`|fd・mmap の RAII、バッファアドレス、QBUF/DQBUF|
+|`include/fades_records.hpp`|64 byteレコード型、ID 更新付き高速コピー|
+|`include/fades_stream.hpp`|`SolverStream`。全件受付・RXのゼロコピー貸出／RAII返却・待機|
+|`tools/fades_benchmark.cpp`|問題集・CPU参照・warmup・測定ループ・期限・統計検査・表示|
+|`tools/fades_verify.cpp`|有限件数の投入と全結果の逐次照合|
+|`tools/fades_stream.cpp`|低レベル ioctl を直接示す、packed record のファイル変換例|
+|`driver/fades.c`|バッファ所有権、DMA SG、IRQ、poll、FPGA制御|
+
+`run_streaming_session` とコールバックによる共通実行ループは廃止した。
+測定方針はベンチマークの `.cpp` にあり、SolverStream はファイルや測定時間、CPU参照を知らない。
+入力の高速コピーは cached な source の先読みと NEON 全幅 store によって、ID 更新とコピーを
+1回の DMA メモリー書き込みに融合する。source/destination は重ねない。
+
+## 低レベル ioctl ABI v3
+
+`Device` はコンストラクタで `/dev/fades` を排他的 open、INFO 検証、TX/RX mmap まで行う。
+失敗時は取得済み資源を解放。`native_handle()` / `info()` で fd と構成を参照する。
+`buffer_data(queue, index)` はバッファ先頭、`enqueue` / `dequeue` は QBUF / DQBUF のラッパー。
 
 |領域|mmap offset|長さ|
 |---|---:|---:|
 |TX|0|`info.map_bytes`|
 |RX|`info.map_bytes`|`info.map_bytes`|
 
-各領域は 1 MiB × 8 slot = 8 MiB。各 slot の先頭は
-`mapping + index * info.slot_bytes`。1レコード64 byte、1 slot 最大16,384問。
-ここで **slot は循環させるバッファ1面**の意味で、コア内の処理枠ではない。
-例えば「TX の index=3」は4番目の入力バッファ、「RX の index=3」は
-4番目の結果バッファを指す。両者が同じ問題群を含むという意味ではない。
-MAP_SHARED で領域全体を mmap する。CPU の手動 cache flush は不要。
-DMA バッファは非コヒーレント HP ポート向けの coherent DMA mapping で公開する。
-
-### 2. キュー操作
+各領域は1 MiB × 8面。`mapping + index * info.slot_bytes` が各バッファの先頭。
+MAP_SHARED で領域全体を mmap。
+TX は `dma_alloc_coherent` / `dma_mmap_coherent` で、書き込み向けのマッピングを使う。
+RX は `dma_alloc_pages` / `dma_mmap_pages` でキャッシュ可能にする。
+ドライバーが DMA 開始前・完了後・中断後の所有権移動で Linux DMA API の同期を行い、
+CPU が手動 cache flush を行う必要はない。descriptor 自体は coherent メモリーに置く。
+結果はこの cached mapping を直接読む。ベンチマークの読み出しでは NEON と先読みを使う。
 
 ```c
 struct fades_buffer {
-    __u32 queue;       /* FADES_QUEUE_TX=0 / FADES_QUEUE_RX=1 */
-    __u32 index;       /* 0..info.slots-1 */
+    __u32 queue;       /* FADES_QUEUE_TX / FADES_QUEUE_RX */
+    __u32 index;       /* 0..7 */
     __u32 records;
     __u32 reserved;    /* 0 */
 };
 ```
 
-|操作|records|意味|
-|---|---|---|
-|`FADES_QBUF` TX|1〜16,384|問題を書き込んだ入力バッファを登録|
-|`FADES_QBUF` RX|0|空の出力バッファを登録|
-|`FADES_DQBUF` TX|返り値|転送済み入力バッファと転送件数を取得|
-|`FADES_DQBUF` RX|返り値|結果バッファと実際の結果件数を取得|
-
-DQBUF の入力は queue と reserved=0。index/records は出力値。
-**DQBUF は常に非ブロッキング**で、完了がなければ EAGAIN。
-QBUF は登録だけを行い、DMA 完了を待たない。STREAMON 前にも登録できる。
-RX が不足すればドライバーが TX の実行を待機させる。
+|操作|意味|
+|---|---|
+|INFO|ABI・mmap 構成を取得|
+|QBUF(TX)|1〜16,384 問を一括登録。STREAMON 前にも登録可能|
+|QBUF(RX)|records=0 で空の受信バッファを登録。実際の受信容量は N 問|
+|DQBUF(TX)|入力メモリーを再利用可能にする。解の完成は意味しない|
+|DQBUF(RX)|完成した full/idle-tail スロットと実件数を取得|
+|STREAMON|容量16,384問を設定して初期化・開始。引数なし|
+|END_INPUT|新規 TX を締め切る。以後 QBUF(TX) は EPIPE。RX は回収・再登録可能|
+|STREAMOFF|両 DMA と solver を停止・reset し、全バッファを CPU 所有へ戻す|
+|STATS|累積カウンターの snapshot|
 
 所有権は `CPU → QBUF → driver → DQBUF → CPU`。
-**QBUF 後から DQBUF まで、その slot を CPU から読み書きしない。**
-二重 QBUF は EBUSY。不正な queue/index/件数/reserved は EINVAL。
-DQBUF の copy_to_user が失敗した場合、完了は失われず再試行できる。
+QBUF 後から DQBUF まで、そのバッファを CPU から読み書きしない。
+二重登録は EBUSY、不正引数は EINVAL。DQBUF は常に非待機で、空なら EAGAIN。
+DQBUF の copy_to_user 失敗では完了を失わず再試行できる。
 
-TX 完了は入力メモリーの再利用許可であり、数独の完了通知ではない。
-入力と結果の順序は異なり、**TX slot と RX slot は対応しない**。
-各結果の request ID で対応付け、未完了の問題間では ID を一意にする。
+同じ fd の poll は **POLLIN=RX完了、POLLOUT=TX完了、POLLERR=異常**。
+POLLOUT は空き容量ではなく、TX 完了キューが非空という意味。
+close も停止処理を行う。mmap が file を保持するため、最後の mapping を閉じてから
+排他的 open が解放される。異常後は STREAMOFF で再初期化してから再開する。
 
-### 3. 開始・poll・循環
-
-`FADES_STREAMON` は両 DMA と solver を初期化し、キューを動かす。
-通常のバッファ境界ではリセットせず、稼働中も追加 QBUF できる。
-
-|poll event|意味|
-|---|---|
-|POLLIN|DQBUF(RX) できる完了がある|
-|POLLOUT|DQBUF(TX) できる完了がある|
-|POLLERR|DMA / solver 異常。STREAMOFF で停止する|
-|POLLERR + POLLHUP|デバイスが取り外された|
-
-POLLOUT は「空き容量」ではなく **TX 完了キューが非空**という契約。
-初期の未使用 slot はユーザーが番号を把握して直接 QBUF する。
-完了キューが非空の間は level-triggered で通知する。
-
-```c
-/* INFO、TX/RX の mmap は済んでいるものとする。エラー処理は省略。 */
-for (unsigned i = 0; i < info.slots; ++i) {
-    struct fades_buffer b = { FADES_QUEUE_RX, i, 0, 0 };
-    ioctl(fd, FADES_QBUF, &b);
-}
-ioctl(fd, FADES_STREAMON);
-/* 初期TXに問題を詰めてQBUFし、submittedに件数を加える。 */
-
-while (!eof || received != submitted) {
-    struct pollfd p = {fd, POLLIN | (eof ? 0 : POLLOUT), 0};
-    poll(&p, 1, timeout_ms);
-    /* EINTR・timeout・POLLERR/POLLHUP/POLLNVAL を処理する。 */
-
-    struct fades_buffer b = { FADES_QUEUE_RX, 0, 0, 0 };
-    while (ioctl(fd, FADES_DQBUF, &b) == 0) {
-        consume(rx + b.index * info.slot_bytes, b.records);
-        received += b.records;
-        b.records = 0;
-        ioctl(fd, FADES_QBUF, &b);
-    } /* EAGAIN 以外はエラー */
-
-    b = (struct fades_buffer){ FADES_QUEUE_TX, 0, 0, 0 };
-    while (!eof && ioctl(fd, FADES_DQBUF, &b) == 0) {
-        b.records = fill_next(tx + b.index * info.slot_bytes, 10000);
-        if (b.records) {
-            ioctl(fd, FADES_QBUF, &b);
-            submitted += b.records;
-        } else {
-            ioctl(fd, FADES_END_INPUT);
-            eof = true;
-        }
-    }
-}
-ioctl(fd, FADES_STREAMOFF);
-```
-
-### 4. 終了・再開始
-
-`FADES_END_INPUT` は新規 TX を締め切り、待たずに戻る。
-以後の QBUF(TX) は EPIPE。登録済み入力は引き続き処理し、RX は再登録できる。
-投入件数と受け取った結果件数が一致するまで RX を回収する。
-入力終了後は poll の POLLOUT を外し、未回収 TX 完了による busy loop を避ける。
-空入力でも STREAMON → END_INPUT → STREAMOFF で終了できる。
-
-`FADES_STREAMOFF` は処理を停止・キャンセルし、未回収完了を含む全 slot を
-CPU 所有に戻す。次回は必要な RX/TX を再登録して STREAMON する。
-異常後も両 DMA と全 solver/FIFO をリセットしてから再開始する。
-close も停止処理を行う。mmap は file 参照を保持するため、最後の mapping も閉じて
-から排他的 open が解放される。待機 timeout はユーザーの poll で指定する。
-
-### C++ の共通ヘルパー
-
-`include/fades_stream.hpp` の `Device` は fd と mapping を所有する RAII クラス。
-**コンストラクタで open・INFO 検証・TX/RX mmap まで完了**し、途中で失敗すれば
-取得済みの資源を解放して例外を送出する。デストラクタは処理停止・unmap・close を行う。
-内部状態は private とし、`native_handle()` / `info()` で fd と構成を参照する。
-
-- `buffer_data(queue, index)`: 指定したバッファ1面の先頭を取得する。CPU 所有時だけアクセスする。
-- `enqueue(queue, index, records)`: QBUF で登録する。
-- `dequeue(queue, buffer)`: DQBUF で完了を回収する。EAGAIN だけ false、それ以外の失敗は例外。
-
-verify/benchmark 共通の `run_streaming_session` は、初期登録から開始・補充・結果回収・
-入力締め切り・最終排出・統計取得・停止までを、1スレッドで実行する関数。
-次の2つのコールバックを呼び出す。
-
-```cpp
-// CPU所有のTX領域へ count 問を必ず書く。first_record は通算0始まりの番号。
-// request ID の割り当てはこのコールバックの責任。
-void write_input_buffer(uint8_t* data, unsigned count, uint64_t first_record);
-
-// 完了したRXバッファの count 件を読む。Device::buffer_data(RX, index)で参照。
-// 戻った直後に再登録されるため、参照を後まで保持しない。
-void read_output_buffer(unsigned index, unsigned count);
-```
-
-型パラメーターは、この署名に合うラムダ／関数オブジェクトの型を受け取るためのもの。
-コールバックはどちらも呼び出し元スレッドで同期実行される。
-戻り値 `StreamingResult` は投入／完了レコード数、完了パケット数、秒単位の時間、
-最終 PL 統計を持つ値オブジェクト。各メンバーの単位・計測範囲はヘッダーの docstring を参照。
+DMA は RX を N 件の容量で独立に先行登録する。TX の件数は開始前／投入時に全件を HW に
+通知し、その後 DMA へ送る。HW が N 件または最後の結果で TLAST を付ける。
+ドライバーは短い RX の実 byte 数を確認して records を返す。
+専用 AXI DMA の MMIO/IRQ は FADES が所有し、32要素の事前リンク済み SG ring の tail を延長する。
 
 ## レコード形式
 
@@ -181,92 +178,51 @@ void read_output_buffer(unsigned index, unsigned count);
 |81セル × 4 bit|387:64|395:72|
 |予約|511:388|511:396|
 
-セルは行優先、先頭セルが下位 nibble。入力0は空欄、1〜9はヒント。
-入力予約領域はゼロ。status は0=解あり、1=解なし、2=不正セル。
-status != 0 の出力セルと、全出力の予約領域はゼロ。
+セルは行優先、先頭セルが下位 nibble。入力0は空欄、1〜9はヒント、予約領域はゼロ。
+status は0=解あり、1=解なし、2=不正セル。status != 0 の出力セルと出力予約領域はゼロ。
+未完了要求の ID は一意にする。
 
-## ツール
-
-|ツール|用途|入力|出力・終了条件|
-|---|---|---|---|
-|`fades_stream`|ioctl の利用例・ファイル間の数独処理|ID を割り当て済みの64 byte packed record|結果 record をファイルに書き、入力 EOF 後に全件回収して終了|
-|`fades_verify`|全結果の正当性確認|テキスト問題集・転送件数|CPU 参照解と全件照合し、指定件数で終了|
-|`fades_benchmark`|継続投入の性能測定|テキスト問題集・測定秒数|入力を循環投入し、期限後に排出して速度・検証結果を表示|
-
-`fades_stream.cpp` は QBUF/DQBUF/poll の操作を明示する。
-`fades_benchmark.cpp` は同じ ioctl を使う共通関数 `run_streaming_session` に
-入力供給と結果回収の処理を渡し、問題のエンコード・一意 ID 生成・時間計測・前後の解検証を行う。
-`fades_stream` のファイル入出力時間は、このベンチマークの測定範囲には含めない。
+## ツールと測定範囲
 
 ```sh
-# packed 64-byte records をファイル間でストリーム処理
 build/kv260-ps/host/fades_stream input.bin output.bin 10000
-
-# 既存の問題テキストを使う正当性検証
 build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 8193 6 3
 build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 1024 3 3 mixed
 build/kv260-ps/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
-
-# 時間指定の継続投入ベンチマーク
 build/kv260-ps/host/fades_benchmark sim/data/17puz49158.txt 10
 ```
 
-`fades_stream` は packed record ファイルを扱い、出力は完了順。
-入力 ID の割り当ては呼び出し側が行う。入力は64 byte の整数倍でなければ拒否する。
+- `fades_stream`: packed record を一度ずつ処理して完了順にファイル出力する ioctl 例。
+  呼び出し側が入力 ID を割り当てる。任意引数は1回の入力件数で、出力容量は16,384問固定。
+  EOF 後は全件回収して終了。
+- `fades_verify`: 総件数は `RECORDS_PER_PACKET × SLOTS × ROUNDS`。
+  この SLOTS は総件数を定める論理値で、SolverStream の物理バッファは常に8面。
+  round 境界で排出せず、warmup と測定の全結果を CPU 参照解・ID・status・予約領域と照合する。
+  mixed は論理 round の末尾64問を解なし32問・不正入力32問に置換する。
+  一意解問題集を使う。速度は入力準備・借りたスロット上の全解検証・返却込み。
+- `fades_benchmark`: 8面 × 16,384問で問題集を循環し、期限まで一括投入を続け、最後に一度排出。
+  **初回からの入力コピー・一意 ID 更新・全結果の64 byteを加算チェックサムへ読み込む処理・
+  RX返却／再登録・最終排出**を計測する。出力の追加コピーは行わない。
+  デバイス準備、テキスト読み込み・エンコード・CPU参照、独立した計測前後各131,072件の全解検証は計測外。
+  測定中は DMA 長・最終 PL 件数を検査し全結果を読むが、数独内容の逐一照合は行わない。
+  チェックサムは読み出しを観測可能にするために表示する。ファイル入出力時間は含まない。
 
-問題テキストは1行81文字、空欄 `.`、ヒント `1〜9`、セル間空白なし。
-LF/CRLF に対応。空行は読み飛ばし、不正文字・長さは拒否する。
+テキスト問題は1行81文字、空欄 `.`、ヒント `1〜9`、セル間空白なし。LF/CRLF に対応。
+空行は読み飛ばし、不正文字・長さは拒否する。
+過去の「DMA受信はするが、結果をCPUでは全件読まない」測定とは条件が異なる。
+測定結果は [STREAMING_RESULTS.md](STREAMING_RESULTS.md)。
 
-### verify
+## 実機試験
 
-引数は `DATASET RECORDS_PER_PACKET SLOTS ROUNDS [mixed]`。
-総件数は `RECORDS_PER_PACKET × SLOTS × ROUNDS` だが、**round 境界で待たずに**
-1つのセッションとして処理する。問題ファイルは循環して使う。
-warmup と測定セッションの**全結果**を CPU 参照解・ID 重複・status・予約領域と照合する。
-mixed は各論理 round の末尾64件を解なし32件・不正入力32件に置換する。
-複数解の入力では別の正しい解でも CPU 参照解との一致に失敗し得るため、
-通常入力は一意解の問題集を使う。速度には逐次の全解検証も含む。
-
-### benchmark
-
-引数は `PUZZLE_FILE SECONDS`。秒数は有限の0.001〜86400。
-8面 × 10,000問を使い、全ファイルを循環して、空いた入力へ次の問題を詰める。
-ID はセッション内で単調増加し、未完了要求との重複を避ける。
-期限で新規投入を止め、一度だけ最終排出する。
-
-計測前: ファイル読み込み、独立 CPU 参照、初期 DDR 準備、warmup 全件検証。
-計測内: STREAMON、入力再充填・コピー・ID 更新、QBUF/DQBUF/poll、DMA、計算、最終排出。
-計測後: 各 RX slot に最後に格納された結果を全件検証、重複 ID と累積 PL 件数を検査。
-中間の全解は CPU で逐一照合しない。解なし・複数解の入力も使用可能。
-
-高速な入力供給では、エンコード済み問題を通常の cached メモリーに保持し、
-`fades_stream.hpp` の `copy_records_with_ids(destination, source, count, first_id)` を使える。
-ID を付けながら DMA mapping へ一度だけ書き、AArch64 では NEON の全幅 store と
-先読みを使う。source と destination は重ねず、CPU 所有の TX slot にだけ書く。
-KV260 ネイティブビルドでは Cortex-A53 向けにコンパイルする。
-
-実時間による排出込み速度、期限内に観測した packet 完了件数と速度、最終排出時間、
-再充填時間を表示する。期限内件数は通知回収時刻による packet 単位の保守的な値。
-件数には同一問題の再投入を含む。準備済み DDR をコピーせず反復する旧 RUN 測定とは
-条件が異なり、速度を直接比較しない。
-
-## ドライバーと実機試験
-
-専用 AXI DMA の MMIO と IRQ は FADES が排他的に所有する。
-32要素の事前リンク済み SG descriptor ring を各方向に置き、稼働中は tail を延長する。
-同時所有バッファは各方向8面なので、再利用 descriptor と HW の先読み位置には余裕がある。
-descriptor 完了ごとに通知でき、全チェーンの排出を待ってから次を起動する方式ではない。
-Device Tree に別の Xilinx DMA provider ノードは作らない。
-
-ロード後に実機で実行:
+対応する v3 回路・overlay・ドライバーをセットでロードする。
+ロード手順は [KV260](../fpga/kv260/README.md)。
 
 ```sh
 python3 host/tests/check_abi.py
 python3 host/tests/check_stream.py
 python3 host/tests/check_stream_cli.py build/kv260-ps/host/fades_stream
+build/kv260-ps/host/solver_stream_board_test
 ```
 
-前者は ABI・不正引数・所有権・mmap、後者は可変長・SG ring 周回・ID/解の照合・
-RX 枯渇からの再開・中断/再開始を検査する。
-回路・overlay・モジュールは対応する v2 をまとめてロードする。
-ロード手順は [KV260](../fpga/kv260/README.md)。
+CTest はパーサー・RAII失敗注入・全件受付／未受付・貸出の移動／寿命／返却エラー試験を実行する。
+上記の実機試験は、固定容量／端数・入力結合・RX枯渇からの再開・SG周回・キャンセル・再開始を検査する。

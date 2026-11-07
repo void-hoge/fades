@@ -1,21 +1,25 @@
-// Performance tool: load a text puzzle corpus and replay it until a deadline,
-// generating unique IDs and reporting throughput. Results are validated rather
-// than written to a record file. Uses the same ioctls as fades_stream.cpp via
-// run_streaming_session. Initial preparation, CPU reference and warmup/final
-// full-content checks are outside timing.
+// Fixed-slot benchmark. The loop here owns the deadline and measurements;
+// SolverStream only submits/copies whole slots and waits for device progress.
+// Every timed output byte is read into a checksum before releasing its RX loan.
 #include "fades_stream.hpp"
 #include "sudoku.hpp"
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
-#include <limits>
 #include <unordered_set>
 #include <vector>
 
 using Record = std::array<uint8_t, 64>;
+using Clock = std::chrono::steady_clock;
+
+/** Convert a monotonic elapsed interval to seconds. */
+static double seconds(Clock::time_point begin, Clock::time_point end) {
+    return std::chrono::duration<double>(end - begin).count();
+}
 
 /** Parsed input and independent CPU solvability classification for validation. */
 struct Puzzle {
@@ -42,6 +46,36 @@ static uint64_t record_id(const Record& record) {
         id |= uint64_t(record[byte]) << (8 * byte);
     }
     return id;
+}
+
+/** Read every result byte into an observable checksum, with no destination copy. */
+static uint64_t consume_results(std::span<const fades::Record> records) {
+#if defined(__aarch64__)
+    uint64x2_t first = vdupq_n_u64(0);
+    uint64x2_t second = vdupq_n_u64(0);
+    uint64x2_t third = vdupq_n_u64(0);
+    uint64x2_t fourth = vdupq_n_u64(0);
+    for (size_t index = 0; index < records.size(); ++index) {
+        if (index + 8 < records.size()) { __builtin_prefetch(records[index + 8].data(), 0, 3); }
+        auto record = vld1q_u8_x4(records[index].data());
+        first = vaddq_u64(first, vreinterpretq_u64_u8(record.val[0]));
+        second = vaddq_u64(second, vreinterpretq_u64_u8(record.val[1]));
+        third = vaddq_u64(third, vreinterpretq_u64_u8(record.val[2]));
+        fourth = vaddq_u64(fourth, vreinterpretq_u64_u8(record.val[3]));
+    }
+    auto sum = vaddq_u64(vaddq_u64(first, second), vaddq_u64(third, fourth));
+    return vgetq_lane_u64(sum, 0) + vgetq_lane_u64(sum, 1);
+#else
+    uint64_t sum = 0;
+    for (const auto& record : records) {
+        for (unsigned offset = 0; offset < 64; offset += 8) {
+            uint64_t word;
+            std::memcpy(&word, record.data() + offset, sizeof(word));
+            sum += word;
+        }
+    }
+    return sum;
+#endif
 }
 
 /** Run warmup, a duration-limited stream, and final resident-buffer validation. */
@@ -82,23 +116,9 @@ int main(int argc, char** argv) try {
     for (auto& puzzle : puzzles) {
         puzzle.solvable = reference::solve(puzzle.board).solutions != 0;
     }
-    fades::Device device;
-    constexpr unsigned records_per_buffer = 10000;
-    const unsigned buffer_count = device.info().slots;
+    constexpr unsigned records_per_buffer = FADES_DMA_SLOT_BYTES / sizeof(Record);
+    constexpr unsigned buffer_count = FADES_DMA_SLOTS;
     uint64_t id_base = 0;
-
-    // Populate exactly count input records, cycling the corpus and assigning
-    // IDs id_base + first_record + offset. Invoked with CPU-owned TX memory.
-    auto write_input_buffer = [&](uint8_t* destination, unsigned count, uint64_t first_record) {
-        unsigned copied = 0;
-        while (copied < count) {
-            size_t source_offset = (first_record + copied) % corpus.size();
-            unsigned chunk = unsigned(std::min<size_t>(count - copied, corpus.size() - source_offset));
-            fades::copy_records_with_ids(destination + size_t(copied) * 64, corpus[source_offset].data(),
-                                         chunk, id_base + first_record + copied);
-            copied += chunk;
-        }
-    };
 
     // Check one result against its corpus input and add its ID to the phase's
     // duplicate detector. Called only outside the measured benchmark interval.
@@ -143,66 +163,133 @@ int main(int argc, char** argv) try {
         }
     };
 
-    id_base = 0x1234567800000000ULL;
-    std::vector<Record> warmup_records;
-    auto warmup = fades::run_streaming_session(
-        device, records_per_buffer, buffer_count, uint64_t(records_per_buffer) * buffer_count,
-        0, write_input_buffer, [&](unsigned index, unsigned count) {
-            // Preserve warmup results before this RX buffer is recycled.
-            auto previous_size = warmup_records.size();
-            warmup_records.resize(previous_size + count);
-            std::memcpy(warmup_records.data() + previous_size,
-                        device.buffer_data(FADES_QUEUE_RX, index), size_t(count) * 64);
-        });
     std::unordered_set<uint64_t> seen;
-    for (const auto& record : warmup_records) {
-        verify_record(record, warmup.completed_records, seen);
-    }
-    std::cout << "Warmup verification PASS: " << warmup.completed_records << " IDs\n"
-              << "Streaming: " << buffer_count << " slots x " << records_per_buffer
+    const uint64_t warmup_count = uint64_t(records_per_buffer) * buffer_count;
+    // Independent correctness sessions before/after timing, with all answers
+    // checked directly in their borrowed slots. No benchmark loop is hidden.
+    auto verify_session = [&](uint64_t phase_id_base, const char* phase) {
+        id_base = phase_id_base;
+        seen.clear();
+        fades::SolverStream warmup;
+        uint64_t submitted = 0;
+        while (submitted < warmup_count || warmup.outstanding()) {
+            auto output = warmup.try_receive();
+            size_t received = output ? output->size() : 0;
+            if (output) {
+                for (const auto& record : output->records()) { verify_record(record, warmup_count, seen); }
+                output->release();
+            }
+            bool accepted = false;
+            if (submitted < warmup_count) {
+                size_t offset = submitted % corpus.size();
+                size_t count = std::min<uint64_t>({records_per_buffer, corpus.size() - offset,
+                                                  warmup_count - submitted});
+                auto inputs = std::span(corpus).subspan(offset, count);
+                accepted = warmup.try_submit(inputs, id_base + submitted);
+                if (accepted) { submitted += count; }
+                if (submitted == warmup_count) { warmup.finish_input(); }
+            }
+            if (!received && !accepted && !warmup.wait(60000)) {
+                throw std::runtime_error("Warmup progress timeout");
+            }
+        }
+        if (seen.size() != warmup_count) { throw std::runtime_error("Missing verification result"); }
+        std::cout << phase << " verification PASS: " << warmup_count << " IDs\n";
+    };
+    verify_session(0x1234567800000000ULL, "Warmup");
+    std::cout << "Streaming: " << buffer_count << " slots x " << records_per_buffer
               << " records; requested=" << duration << " s\n"
-              << "Refill/copy and unique ID generation are included; initial DDR fill is excluded." << std::endl;
+              << "Input copy/ID updates, reading ALL 64 result bytes, and RX recycling are included; no output copy." << std::endl;
 
     id_base = 0xcafe987600000000ULL;
-    std::array<unsigned, FADES_DMA_SLOTS> last_buffer_lengths{};
-    auto result = fades::run_streaming_session(
-        device, records_per_buffer, buffer_count, std::numeric_limits<uint64_t>::max(),
-        duration, write_input_buffer, [&](unsigned index, unsigned count) {
-            // Track only the final resident length; avoid timed content scans.
-            last_buffer_lengths[index] = count;
-        });
-    seen.clear();
-    for (unsigned buffer = 0; buffer < buffer_count; ++buffer) {
-        for (unsigned index = 0; index < last_buffer_lengths[buffer]; ++index) {
-            Record record;
-            std::memcpy(record.data(), device.buffer_data(FADES_QUEUE_RX, buffer) + size_t(index) * 64, 64);
-            verify_record(record, result.submitted_records, seen);
+    {
+        fades::SolverStream solver;
+        uint64_t checksum = 0;
+        uint64_t submitted = 0;
+        uint64_t received = 0;
+        uint64_t packets = 0;
+        uint64_t observed_before_deadline = 0;
+        double submission_seconds = 0;
+        const auto begin = Clock::now();
+        const auto deadline = begin + std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(duration));
+
+        while (Clock::now() < deadline) {
+            auto output = solver.try_receive();
+            size_t completed = output ? output->size() : 0;
+            if (output) {
+                checksum += consume_results(output->records());
+                output->release();
+                received += completed;
+                ++packets;
+                if (Clock::now() <= deadline) { observed_before_deadline += completed; }
+            }
+            if (Clock::now() >= deadline) { break; }
+            size_t offset = submitted % corpus.size();
+            size_t count = std::min<size_t>(records_per_buffer, corpus.size() - offset);
+            auto inputs = std::span(corpus).subspan(offset, count);
+            const auto submission_begin = Clock::now();
+            bool accepted = solver.try_submit(inputs, id_base + submitted);
+            submission_seconds += seconds(submission_begin, Clock::now());
+            if (accepted) { submitted += count; }
+            if (!completed && !accepted) { solver.wait_until(deadline); }
+        }
+
+        solver.finish_input();
+        const auto drain_begin = Clock::now();
+        while (solver.outstanding()) {
+            auto output = solver.try_receive();
+            size_t completed = output ? output->size() : 0;
+            if (output) {
+                checksum += consume_results(output->records());
+                output->release();
+                received += completed;
+                ++packets;
+            } else if (!solver.wait(60000)) {
+                throw std::runtime_error("Final drain timeout");
+            }
+        }
+        const auto end = Clock::now();
+        const double elapsed = seconds(begin, end);
+        const auto statistics = solver.statistics();
+        if (received != submitted) { throw std::runtime_error("Missing results"); }
+        for (unsigned index : {0u, 1u, 3u, 4u}) {
+            if (statistics.counters[index] != submitted) { throw std::runtime_error("PL stage count mismatch"); }
+        }
+        uint64_t dispatched = 0;
+        uint64_t collected = 0;
+        for (unsigned core = 0; core < 6; ++core) {
+            dispatched += statistics.counters[6 + core];
+            collected += statistics.counters[12 + core];
+            if (statistics.counters[38 + core] > 2) { throw std::runtime_error("PL inflight limit exceeded"); }
+        }
+        if (dispatched != submitted || collected != submitted) { throw std::runtime_error("PL core count mismatch"); }
+
+        std::cout << std::fixed << std::setprecision(6)
+              << "Requested seconds: " << duration << '\n'
+              << "Actual timed seconds (including final drain): " << elapsed << '\n'
+              << "Completed requests: " << received << '\n'
+              << "Throughput: " << received / elapsed << " problem/s (" << received / elapsed / 1e6 << " Mproblem/s)\n"
+              << "Packet completions observed within requested window: " << observed_before_deadline << '\n'
+              << "Observed-window throughput: " << observed_before_deadline / duration / 1e6 << " Mproblem/s\n"
+              << "Final drain seconds: " << seconds(drain_begin, end) << '\n'
+              << "Deadline overrun seconds: " << std::max(0.0, elapsed - duration) << '\n'
+              << "Completed packets: " << packets << '\n'
+              << "Timed input submission seconds: " << submission_seconds << '\n'
+              << "All-result checksum: " << checksum << '\n'
+              << "FIFO write-domain peak: " << statistics.counters[30] << '\n'
+              << "DMA input stall cycles: " << statistics.counters[2] << '\n'
+              << "Input FIFO empty cycles: " << statistics.counters[5] << '\n';
+        for (unsigned core = 0; core < 6; ++core) {
+            std::cout << "Core " << core << ": dispatched=" << statistics.counters[6 + core]
+                      << ", collected=" << statistics.counters[12 + core]
+                      << ", input_wait=" << statistics.counters[32 + core]
+                      << ", output_wait=" << statistics.counters[24 + core] << '\n';
         }
     }
-    std::cout << "Final resident-buffer verification PASS: " << seen.size() << " IDs\n"
-              << std::fixed << std::setprecision(6)
-              << "Requested seconds: " << duration << '\n'
-              << "Actual timed seconds (including final drain): " << result.elapsed_seconds << '\n'
-              << "Completed requests: " << result.completed_records << '\n'
-              << "Throughput: " << result.completed_records / result.elapsed_seconds << " problem/s ("
-              << result.completed_records / result.elapsed_seconds / 1e6 << " Mproblem/s)\n"
-              << "Packet completions observed within requested window: " << result.records_observed_before_deadline << '\n'
-              << "Observed-window throughput: " << result.records_observed_before_deadline / duration / 1e6 << " Mproblem/s\n"
-              << "Final drain seconds: " << result.drain_seconds << '\n'
-              << "Deadline overrun seconds: " << std::max(0.0, result.elapsed_seconds - duration) << '\n'
-              << "Completed packets: " << result.completed_packets << '\n'
-              << "Timed input refill seconds: " << result.refill_seconds << '\n'
-              << "FIFO write-domain peak: " << result.solver_stats.counters[30] << '\n'
-              << "DMA input stall cycles: " << result.solver_stats.counters[2] << '\n'
-              << "Input FIFO empty cycles: " << result.solver_stats.counters[5] << '\n';
-    for (unsigned core = 0; core < 6; ++core) {
-        std::cout << "Core " << core << ": dispatched=" << result.solver_stats.counters[6 + core]
-                  << ", collected=" << result.solver_stats.counters[12 + core]
-                  << ", input_wait=" << result.solver_stats.counters[32 + core]
-                  << ", output_wait=" << result.solver_stats.counters[24 + core] << '\n';
-    }
-    std::cout << "Errors: 0\nCounts include repeated puzzles. Full content checks cover warmup and final resident buffers;\n"
-              << "the timed stream checks DMA lengths and final cumulative PL counts.\n";
+    verify_session(0x5678123400000000ULL, "Post-run");
+    std::cout << "Errors: 0\nCounts include repeated puzzles. Full content checks cover independent pre/post sessions;\n"
+              << "the timed stream reads all result bytes and checks DMA lengths/final PL counts.\n";
     return 0;
 } catch (const std::exception& error) {
     std::cerr << "FAIL: " << error.what() << '\n';

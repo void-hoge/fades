@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise ABI v2 rejection/ownership paths without issuing a DMA transfer."""
+"""Exercise ABI v3 rejection/ownership paths without issuing a DMA transfer."""
 
 import errno
 import fcntl
@@ -38,7 +38,7 @@ def main():
         info = bytearray(INFO.size)
         fcntl.ioctl(fd, INFO_CMD, info, True)
         version, slots, slot_bytes, reserved, map_bytes = INFO.unpack(info)
-        assert (version, slots, slot_bytes, reserved) == (2, 8, 1048576, 0)
+        assert (version, slots, slot_bytes, reserved) == (3, 8, 1048576, 0)
         assert map_bytes == slots * slot_bytes
         expect_errno(errno.EBUSY, lambda: os.open(device, os.O_RDWR | os.O_CLOEXEC))
         expect_errno(errno.ENOTTY, lambda: fcntl.ioctl(fd, (ord("F") << 8) | 2))

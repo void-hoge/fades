@@ -3,16 +3,17 @@
 // and final drain. Unlike fades_benchmark.cpp, this tool does not encode a text
 // corpus, repeat it for a duration, measure throughput, or check result contents.
 // Use request IDs, not file position, to match results to inputs.
-#include "fades_stream.hpp"
+#include "fades_device.hpp"
 #include <fstream>
 #include <iostream>
+#include <poll.h>
 
 /** Stream packed records between files using explicit ioctls and one poll fd. */
 int main(int argc, char** argv) try {
     if (argc != 3 && argc != 4) {
         throw std::runtime_error("Usage: fades_stream INPUT_RECORDS OUTPUT_RECORDS [RECORDS_PER_BUFFER]");
     }
-    unsigned records_per_buffer = argc == 4 ? std::stoul(argv[3]) : 10000;
+    unsigned records_per_buffer = argc == 4 ? std::stoul(argv[3]) : FADES_DMA_SLOT_BYTES / 64;
     if (!records_per_buffer || records_per_buffer > 16384) {
         throw std::runtime_error("Invalid records per buffer");
     }

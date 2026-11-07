@@ -8,6 +8,21 @@
 #include <vector>
 
 using Record = std::array<uint8_t, 64>;
+using Clock = std::chrono::steady_clock;
+
+/** Measurements and counters for one fully checked verification session. */
+struct VerificationResult {
+    uint64_t completed_records = 0;
+    uint64_t completed_packets = 0;
+    double elapsed_seconds = 0;
+    double drain_seconds = 0;
+    fades_solver_stats solver_stats{};
+};
+
+/** Convert a monotonic elapsed interval to seconds. */
+static double seconds(Clock::time_point begin, Clock::time_point end) {
+    return std::chrono::duration<double>(end - begin).count();
+}
 
 /** Decode the little-endian request ID from bytes 0..7. */
 static uint64_t get_id(const Record& record) {
@@ -59,7 +74,7 @@ int main(int argc, char** argv) try {
     if (mixed && records_per_round < 64) {
         throw std::runtime_error("Mixed test requires at least 64 records");
     }
-    const auto preparation_begin = fades::Clock::now();
+    const auto preparation_begin = Clock::now();
     std::ifstream dataset(argv[1]);
     if (!dataset) {
         throw std::runtime_error("Cannot open dataset");
@@ -90,20 +105,20 @@ int main(int argc, char** argv) try {
     if (puzzles.empty()) {
         throw std::runtime_error("Empty dataset");
     }
-    const auto oracle_done = fades::Clock::now();
-    fades::Device device;
+    const auto oracle_done = Clock::now();
     std::vector<Record> staging(records_per_buffer);
 
     // Run total records with IDs id_base + ordinal, checking every RX record.
     // A logical round changes mixed-input selection, not the streaming session.
     auto execute = [&](uint64_t total, uint64_t id_base) {
+        fades::SolverStream solver;
         std::vector<bool> seen(total);
         uint64_t unsolved_records = 0;
         uint64_t invalid_records = 0;
         auto expected_status = [&](uint64_t ordinal) -> unsigned {
             return mixed && ordinal % records_per_round >= records_per_round - 64 ? (ordinal % 2 ? 2 : 1) : 0;
         };
-        auto write_input_buffer = [&](uint8_t* destination, unsigned count, uint64_t first_record) {
+        auto prepare_input = [&](unsigned count, uint64_t first_record) {
             for (unsigned index = 0; index < count; ++index) {
                 uint64_t ordinal = first_record + index;
                 auto& record = staging[index];
@@ -119,12 +134,10 @@ int main(int argc, char** argv) try {
                 }
                 set_id(record, id_base + ordinal);
             }
-            std::memcpy(destination, staging.data(), size_t(count) * 64);
         };
-        auto read_output_buffer = [&](unsigned buffer_index, unsigned count) {
-            for (unsigned index = 0; index < count; ++index) {
-                Record record;
-                std::memcpy(record.data(), device.buffer_data(FADES_QUEUE_RX, buffer_index) + size_t(index) * 64, 64);
+        auto verify_results = [&](std::span<const fades::Record> results) {
+            for (size_t index = 0; index < results.size(); ++index) {
+                const Record& record = results[index];
                 uint64_t id = get_id(record);
                 if (id < id_base || id - id_base >= total) {
                     throw std::runtime_error("Unknown ID");
@@ -172,8 +185,49 @@ int main(int argc, char** argv) try {
                 }
             }
         };
-        auto result = fades::run_streaming_session(device, records_per_buffer, buffer_count,
-                                                    total, 0, write_input_buffer, read_output_buffer);
+        VerificationResult result;
+        uint64_t submitted = 0;
+        unsigned prepared = 0;
+        const auto begin = Clock::now();
+        auto drain_begin = begin;
+        while (submitted < total || solver.outstanding()) {
+            auto output = solver.try_receive();
+            size_t received = output ? output->size() : 0;
+            if (output) {
+                verify_results(output->records());
+                output->release();
+                result.completed_records += received;
+                ++result.completed_packets;
+            }
+            bool accepted = false;
+            if (submitted < total) {
+                if (!prepared) {
+                    prepared = unsigned(std::min<uint64_t>(records_per_buffer, total - submitted));
+                    prepare_input(prepared, submitted);
+                }
+                accepted = solver.try_submit(std::span(staging).first(prepared));
+                if (accepted) { submitted += prepared; prepared = 0; }
+                if (submitted == total) { solver.finish_input(); drain_begin = Clock::now(); }
+            }
+            if (!received && !accepted && !solver.wait(60000)) {
+                throw std::runtime_error("Verification progress timeout");
+            }
+        }
+        const auto end = Clock::now();
+        result.elapsed_seconds = seconds(begin, end);
+        result.drain_seconds = seconds(drain_begin, end);
+        result.solver_stats = solver.statistics();
+        for (unsigned index : {0u, 1u, 3u, 4u}) {
+            if (result.solver_stats.counters[index] != total) { throw std::runtime_error("PL stage count mismatch"); }
+        }
+        uint64_t dispatched = 0;
+        uint64_t collected = 0;
+        for (unsigned core = 0; core < 6; ++core) {
+            dispatched += result.solver_stats.counters[6 + core];
+            collected += result.solver_stats.counters[12 + core];
+            if (result.solver_stats.counters[38 + core] > 2) { throw std::runtime_error("PL inflight limit exceeded"); }
+        }
+        if (dispatched != total || collected != total) { throw std::runtime_error("PL core count mismatch"); }
         std::cout << "Verified " << total << " unique IDs: solved=" << total - unsolved_records - invalid_records
                   << ", unsolved=" << unsolved_records << ", invalid=" << invalid_records << '\n';
         return result;
@@ -183,8 +237,8 @@ int main(int argc, char** argv) try {
     std::cout << "Continuous stream: " << result.completed_records / result.elapsed_seconds / 1e6
               << " Mproblem/s, " << result.elapsed_seconds << " s, " << result.completed_packets
               << " packets; final drain " << result.drain_seconds << " s\n"
-              << "Oracle preparation (excluded): " << fades::seconds(preparation_begin, oracle_done) << " s\n"
-              << "All streamed results validated inside elapsed time; initial DDR fill excluded.\n"
+              << "Oracle preparation (excluded): " << seconds(preparation_begin, oracle_done) << " s\n"
+              << "Input copies, leased-result validation and RX recycling are included in elapsed time.\n"
               << "Session PL counters:";
     for (auto counter : result.solver_stats.counters) {
         std::cout << ' ' << counter;

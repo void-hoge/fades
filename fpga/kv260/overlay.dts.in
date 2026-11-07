@@ -11,7 +11,7 @@
             #address-cells = <2>;
             #size-cells = <2>;
             sudoku@a0010000 {
-                compatible = "fades,solver-2.0";
+                compatible = "fades,solver-3.0";
                 reg = <0x0 0xa0010000 0x0 0x1000>,
                       <0x0 0xa0000000 0x0 0x10000>;
                 reg-names = "solver", "dma";

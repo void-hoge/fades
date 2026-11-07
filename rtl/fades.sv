@@ -11,10 +11,10 @@ module fades #(
     input wire reset,
     /* verilator lint_on SYNCASYNCNET */
     input wire enable,
-    // DMA-domain output packet commands, posted before the corresponding TX.
-    input wire [31:0] packet_records,
-    input wire packet_valid,
-    output wire packet_ready,
+    // DMA-domain configuration and credit total. Register ALL queued input
+    // before sending it, including work still waiting in the host/DMA.
+    input wire [31:0] slot_records,
+    input wire [63:0] submitted_records,
     input wire [127:0] s_axis_tdata,
     input wire [15:0] s_axis_tkeep,
     input wire s_axis_tvalid, s_axis_tlast,
@@ -233,34 +233,20 @@ module fades #(
     );
     logic [1:0] output_beat;
     logic [31:0] packet_position;
-    // Sixteen commands cover all eight outstanding receive slots with margin.
-    logic [31:0] packet_lengths [0:15];
-    logic [3:0] packet_head, packet_tail;
-    logic [4:0] packet_count;
-    assign packet_ready = !dma_reset && packet_count < 16;
-    wire packet_push = packet_valid && packet_ready;
-    wire packet_pop = m_axis_tvalid && m_axis_tready && m_axis_tlast;
-    always @(posedge dma_clk) begin
-        if (dma_reset) begin packet_head <= 0; packet_tail <= 0; packet_count <= 0; end
-        else begin
-            packet_count <= packet_count + 5'(packet_push) - 5'(packet_pop);
-            if (packet_push) begin
-                packet_lengths[packet_tail] <= packet_records;
-                packet_tail <= packet_tail + 1'b1;
-            end
-            if (packet_pop) packet_head <= packet_head + 1'b1;
-        end
-    end
+    logic record_last;
     assign m_axis_tdata = output_record[128*output_beat +: 128];
     assign m_axis_tkeep = 16'hffff;
-    assign m_axis_tvalid = !dma_reset && output_record_valid && packet_count != 0;
-    assign m_axis_tlast = output_beat == 3 && packet_count != 0 &&
-        packet_position+1'b1 == packet_lengths[packet_head];
+    assign m_axis_tvalid = !dma_reset && output_record_valid && output_count < submitted_records;
+    // Freeze the boundary at the first beat. Later input registrations must
+    // never change TLAST while the last beat is held under backpressure.
+    assign m_axis_tlast = output_beat == 3 && record_last;
     assign output_record_ready = m_axis_tvalid && m_axis_tready && output_beat == 3;
     always @(posedge dma_clk) begin
         if (dma_reset) begin
-            output_beat <= 0; packet_position <= 0; output_count <= 0;
+            output_beat <= 0; packet_position <= 0; output_count <= 0; record_last <= 0;
         end else if (m_axis_tvalid && m_axis_tready) begin
+            if (output_beat == 0)
+                record_last <= packet_position+1'b1 == slot_records || output_count+1'b1 == submitted_records;
             output_beat <= output_beat+1'b1;
             if (output_beat == 3) begin
                 output_count <= output_count+1'b1;

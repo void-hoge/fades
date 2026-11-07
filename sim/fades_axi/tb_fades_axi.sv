@@ -52,15 +52,21 @@ module tb_fades_axi;
     initial begin
         repeat(20)@(negedge dma_clk);aresetn=1;
         read_reg(0,value);if(value!==1)$fatal(1,"Reset default");
-        read_reg(20,value);if(value!==32'h46414402)$fatal(1,"Version");
+        read_reg(20,value);if(value!==32'h46414403)$fatal(1,"Version");
         write_reg(0,2,2,1);
         read_reg(0,value);if(value!==1)$fatal(1,"Control byte strobe");
+        write_reg(4,10000,15,0);
         write_reg(0,2,1,0);
         repeat(20)@(negedge dma_clk);
         write_reg(8,17,15,1);
-        read_reg(8,value);if(value!==17)$fatal(1,"Packet length");
-        for(slot=1;slot<16;slot=slot+1) write_reg(8,slot,15,slot%2==0);
-        read_reg(12,value);if(value[2]!==0)$fatal(1,"Command FIFO did not fill");
+        read_reg(8,value);if(value!==17)$fatal(1,"Input credits");
+        write_reg(8,32'hffffffff,15,0);
+        read_reg(8,value);if(value!==16)$fatal(1,"Credit low carry");
+        read_reg(24,value);if(value!==1)$fatal(1,"Credit high carry");
+        write_reg(8,100,1,0);
+        read_reg(8,value);if(value!==16)$fatal(1,"Partial credit write accepted");
+        write_reg(4,1,15,0);
+        read_reg(4,value);if(value!==10000)$fatal(1,"Live capacity changed");
         repeat(100)@(negedge dma_clk);
         write_reg(16,1,1,1);
         repeat(20)@(negedge dma_clk);
@@ -78,7 +84,8 @@ module tb_fades_axi;
             end
         write_reg(0,1,1,1);
         read_reg(0,value);if(value!==1)$fatal(1,"Soft reset");
-        $display("PASS AXI-Lite independent AW/W, strobes, response stalls, packet FIFO, snapshot");
+        read_reg(8,value);if(value!==0)$fatal(1,"Credit reset");
+        $display("PASS AXI-Lite independent AW/W, strobes, response stalls, 64-bit credits, snapshot");
         $finish;
     end
     initial begin #100000;$fatal(1,"Timeout");end

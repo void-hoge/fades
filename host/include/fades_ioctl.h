@@ -5,9 +5,10 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define FADES_DMA_ABI_VERSION 2
+#define FADES_DMA_ABI_VERSION 3
 #define FADES_DMA_SLOTS 8
 #define FADES_DMA_SLOT_BYTES (1024U * 1024U)
+#define FADES_RECORDS_PER_SLOT (FADES_DMA_SLOT_BYTES / 64U)
 
 struct fades_dma_info {
     __u32 abi_version;
@@ -18,7 +19,10 @@ struct fades_dma_info {
     __aligned_u64 map_bytes;
 };
 
-enum fades_queue { FADES_QUEUE_TX = 0, FADES_QUEUE_RX = 1 };
+enum fades_queue {
+    FADES_QUEUE_TX = 0,
+    FADES_QUEUE_RX = 1
+};
 
 struct fades_buffer {
     __u32 queue;

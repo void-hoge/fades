@@ -47,6 +47,7 @@ struct fades_fifo { u32 indices[FADES_DMA_SLOTS], head, count; };
 struct fades_slot { enum slot_state state; u32 records; };
 struct fades_channel {
     void *cpu;
+    struct page *pages; /* RX: cacheable streaming DMA allocation. */
     dma_addr_t address;
     struct fades_bd *bd;
     dma_addr_t bd_address;
@@ -101,7 +102,9 @@ static void fades_free(struct kref *ref)
         struct fades_channel *c = &d->channels[q];
         if (c->bd)
             dma_free_coherent(d->dev, sizeof(*c->bd) * RING_SIZE, c->bd, c->bd_address);
-        if (c->cpu)
+        if (c->pages)
+            dma_free_pages(d->dev, d->map_bytes, c->pages, c->address, DMA_BIDIRECTIONAL);
+        else if (c->cpu)
             dma_free_coherent(d->dev, d->map_bytes, c->cpu, c->address);
     }
     put_device(d->dev);
@@ -134,6 +137,12 @@ static int fades_stop(struct fades_dma *d)
     d->faulted = ret != 0;
     for (q = 0; q < 2; q++) {
         struct fades_channel *c = &d->channels[q];
+        unsigned int index;
+        if (q == FADES_QUEUE_RX)
+            for (index = 0; index < FADES_DMA_SLOTS; index++)
+                if (c->slots[index].state == ACTIVE)
+                    dma_sync_single_range_for_cpu(d->dev, c->address,
+                        index * FADES_DMA_SLOT_BYTES, FADES_DMA_SLOT_BYTES, DMA_BIDIRECTIONAL);
         memset(c->slots, 0, sizeof(c->slots));
         memset(&c->pending, 0, sizeof(c->pending));
         memset(&c->done, 0, sizeof(c->done));
@@ -168,12 +177,19 @@ static int fades_start(struct fades_dma *d)
         writel(DMA_IRQ | BIT(16) | BIT(0), channel_regs(d, q) + DMA_CR);
     }
     dma_wmb();
+    writel(FADES_RECORDS_PER_SLOT, d->control + 4);
     writel(2, d->control);
     readl(d->control);
     usleep_range(20, 40);
     d->running = true;
     d->sealed = false;
     d->faulted = false;
+    /* Register every accepted input before any DMA can start, including TX
+     * descriptors waiting for a receive buffer. This prevents false idle cuts. */
+    for (i = 0; i < FADES_DMA_SLOTS; i++)
+        if (d->channels[0].slots[i].state == QUEUED)
+            writel(d->channels[0].slots[i].records, d->control + 8);
+    readl(d->control + 8);
     return 0;
 }
 
@@ -183,6 +199,9 @@ static void submit_bd(struct fades_dma *d, u32 q, u32 index, u32 records)
     struct fades_bd *bd = &c->bd[c->tail];
     dma_addr_t address = c->address + index * FADES_DMA_SLOT_BYTES;
 
+    if (q == FADES_QUEUE_RX)
+        dma_sync_single_range_for_device(d->dev, c->address,
+            index * FADES_DMA_SLOT_BYTES, FADES_DMA_SLOT_BYTES, DMA_BIDIRECTIONAL);
     bd->address = cpu_to_le32(lower_32_bits(address));
     bd->address_hi = cpu_to_le32(upper_32_bits(address));
     bd->control = cpu_to_le32(records * 64 | (q == FADES_QUEUE_TX ? BIT(27) | BIT(26) : 0));
@@ -196,23 +215,20 @@ static void submit_bd(struct fades_dma *d, u32 q, u32 index, u32 records)
     c->active++;
 }
 
-/* Reserve an RX descriptor and a framing command before issuing its TX.
- * RX packet CONTENT is completion ordered, not associated with this TX. */
+/* Post independent full-capacity RX descriptors, then feed TX. Never reserve
+ * one RX per TX: several small inputs can fill the same output slot. AXI
+ * backpressure handles input that spans the remaining receive capacity. */
 static void fades_schedule(struct fades_dma *d)
 {
     struct fades_channel *tx = &d->channels[0], *rx = &d->channels[1];
 
-    while (d->running && !d->faulted && tx->pending.count && rx->pending.count) {
-        u32 t, r, records;
-        if (!(readl(d->control + 12) & BIT(2)))
-            break;
-        t = fifo_pop(&tx->pending);
-        r = fifo_pop(&rx->pending);
-        records = tx->slots[t].records;
-        submit_bd(d, FADES_QUEUE_RX, r, records);
-        writel(records, d->control + 8);
-        readl(d->control + 12);
-        submit_bd(d, FADES_QUEUE_TX, t, records);
+    if (!d->running || d->faulted)
+        return;
+    while (rx->pending.count)
+        submit_bd(d, FADES_QUEUE_RX, fifo_pop(&rx->pending), FADES_RECORDS_PER_SLOT);
+    while (tx->pending.count && rx->active) {
+        u32 index = fifo_pop(&tx->pending);
+        submit_bd(d, FADES_QUEUE_TX, index, tx->slots[index].records);
     }
 }
 
@@ -237,14 +253,21 @@ static irqreturn_t fades_irq(int irq, void *arg)
         while (c->active && !d->faulted) {
             u32 done = le32_to_cpu(READ_ONCE(c->bd[c->head].status));
             u32 index = c->owners[c->head];
+            u32 bytes = done & BD_LENGTH;
+            u32 capacity = c->slots[index].records * 64;
             if (!(done & BD_COMPLETE))
                 break;
             dma_rmb();
-            if ((done & BD_ERRORS) || (done & BD_LENGTH) != c->slots[index].records * 64) {
+            if ((done & BD_ERRORS) || !bytes || bytes % 64 || bytes > capacity ||
+                (q == FADES_QUEUE_TX && bytes != capacity)) {
                 dev_err(d->dev, "channel %u descriptor %#x expected %u bytes\n", q, done, c->slots[index].records * 64);
                 d->faulted = true;
                 break;
             }
+            if (q == FADES_QUEUE_RX)
+                dma_sync_single_range_for_cpu(d->dev, c->address,
+                    index * FADES_DMA_SLOT_BYTES, bytes, DMA_BIDIRECTIONAL);
+            c->slots[index].records = bytes / 64;
             c->slots[index].state = DONE;
             fifo_push(&c->done, index);
             c->head = (c->head + 1) % RING_SIZE;
@@ -339,11 +362,15 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
         c = &d->channels[b.queue];
         if (cmd == FADES_QBUF) {
             if (b.index >= FADES_DMA_SLOTS ||
-                (b.queue == FADES_QUEUE_TX ? !b.records || b.records > FADES_DMA_SLOT_BYTES / 64 : b.records != 0)) {
+                (b.queue == FADES_QUEUE_TX ? !b.records || b.records > FADES_RECORDS_PER_SLOT : b.records != 0)) {
                 ret = -EINVAL; break;
             }
             if (b.queue == FADES_QUEUE_TX && d->sealed) { ret = -EPIPE; break; }
             if (c->slots[b.index].state != CPU) { ret = -EBUSY; break; }
+            if (b.queue == FADES_QUEUE_TX && d->running) {
+                writel(b.records, d->control + 8);
+                readl(d->control + 8);
+            }
             c->slots[b.index].state = QUEUED;
             c->slots[b.index].records = b.records;
             fifo_push(&c->pending, b.index);
@@ -414,7 +441,10 @@ static int fades_mmap(struct file *file, struct vm_area_struct *vma)
     if (d->removed) ret = -ENODEV;
     else {
         vma->vm_pgoff = 0;
-        ret = dma_mmap_coherent(d->dev, vma, c->cpu, c->address, d->map_bytes);
+        if (c->pages)
+            ret = dma_mmap_pages(d->dev, vma, d->map_bytes, c->pages);
+        else
+            ret = dma_mmap_coherent(d->dev, vma, c->cpu, c->address, d->map_bytes);
     }
     mutex_unlock(&d->lock);
     /* The VMA keeps the file, and therefore the buffers, alive. */
@@ -451,12 +481,21 @@ static int fades_probe(struct platform_device *pdev)
     if (IS_ERR(d->control)) { ret = PTR_ERR(d->control); goto fail; }
     d->dma = devm_platform_ioremap_resource(pdev, 1);
     if (IS_ERR(d->dma)) { ret = PTR_ERR(d->dma); goto fail; }
-    if (readl(d->control + 20) != 0x46414402) { ret = -ENODEV; goto fail; }
+    if (readl(d->control + 20) != 0x46414403) { ret = -ENODEV; goto fail; }
     ret = hardware_reset(d);
     if (ret) goto fail;
     for (q = 0; q < 2; q++) {
         struct fades_channel *c = &d->channels[q];
-        c->cpu = dma_alloc_coherent(d->dev, d->map_bytes, &c->address, GFP_KERNEL);
+        if (q == FADES_QUEUE_RX) {
+            c->pages = dma_alloc_pages(d->dev, d->map_bytes, &c->address,
+                                      DMA_BIDIRECTIONAL, GFP_KERNEL | __GFP_ZERO);
+            if (c->pages) {
+                c->cpu = page_address(c->pages);
+                dma_sync_single_for_cpu(d->dev, c->address, d->map_bytes, DMA_BIDIRECTIONAL);
+            }
+        } else {
+            c->cpu = dma_alloc_coherent(d->dev, d->map_bytes, &c->address, GFP_KERNEL);
+        }
         c->bd = dma_alloc_coherent(d->dev, sizeof(*c->bd) * RING_SIZE, &c->bd_address, GFP_KERNEL);
         if (!c->cpu || !c->bd) { ret = -ENOMEM; goto fail; }
         d->irq[q] = platform_get_irq(pdev, q);
@@ -473,7 +512,7 @@ static int fades_probe(struct platform_device *pdev)
     ret = misc_register(&d->misc);
     if (ret) goto fail;
     platform_set_drvdata(pdev, d);
-    dev_info(d->dev, "ABI v2: %u slots x %u bytes, direct AXI DMA SG\n", FADES_DMA_SLOTS, FADES_DMA_SLOT_BYTES);
+    dev_info(d->dev, "ABI v3: %u slots x %u bytes, fixed-capacity output slots\n", FADES_DMA_SLOTS, FADES_DMA_SLOT_BYTES);
     return 0;
 fail:
     while (requested) free_irq(d->irq[--requested], d);
@@ -497,7 +536,7 @@ static void fades_remove(struct platform_device *pdev)
 }
 
 static const struct of_device_id fades_match[] = {
-    { .compatible = "fades,solver-2.0" }, { }
+    { .compatible = "fades,solver-3.0" }, { }
 };
 MODULE_DEVICE_TABLE(of, fades_match);
 static struct platform_driver fades_driver = {
