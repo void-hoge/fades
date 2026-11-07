@@ -33,7 +33,7 @@ using Clock = std::chrono::steady_clock;
  * NEON full-width stores and bounded prefetch avoid a second staging copy and
  * narrow writes to the noncached coherent DMA mapping.
  *
- * @param target Writable destination containing at least count * 64 bytes.
+ * @param destination Writable destination containing at least count * 64 bytes.
  * @param source Cached encoded source containing at least count * 64 bytes.
  * @param count Number of records, not bytes. Zero performs no memory accesses.
  * @param first_id ID for the first record; the caller ensures IDs do not wrap
@@ -41,11 +41,11 @@ using Clock = std::chrono::steady_clock;
  * @pre Source and destination do not overlap. The destination TX buffer is
  *      CPU-owned: it has not been enqueued, or has been dequeued since enqueue.
  */
-inline void copy_records_with_ids(uint8_t* target, const uint8_t* source,
+inline void copy_records_with_ids(uint8_t* destination, const uint8_t* source,
                                   unsigned count, uint64_t first_id) {
     for (unsigned index = 0; index < count; ++index) {
         const uint8_t* input_record = source + size_t(index) * 64;
-        uint8_t* output_record = target + size_t(index) * 64;
+        uint8_t* output_record = destination + size_t(index) * 64;
         uint64_t request_id = first_id + index;
 #if defined(__aarch64__)
         if (index + 8 < count) {

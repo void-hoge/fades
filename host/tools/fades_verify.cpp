@@ -103,7 +103,7 @@ int main(int argc, char** argv) try {
         auto expected_status = [&](uint64_t ordinal) -> unsigned {
             return mixed && ordinal % records_per_round >= records_per_round - 64 ? (ordinal % 2 ? 2 : 1) : 0;
         };
-        auto write_input_buffer = [&](uint8_t* target, unsigned count, uint64_t first_record) {
+        auto write_input_buffer = [&](uint8_t* destination, unsigned count, uint64_t first_record) {
             for (unsigned index = 0; index < count; ++index) {
                 uint64_t ordinal = first_record + index;
                 auto& record = staging[index];
@@ -119,7 +119,7 @@ int main(int argc, char** argv) try {
                 }
                 set_id(record, id_base + ordinal);
             }
-            std::memcpy(target, staging.data(), size_t(count) * 64);
+            std::memcpy(destination, staging.data(), size_t(count) * 64);
         };
         auto read_output_buffer = [&](unsigned buffer_index, unsigned count) {
             for (unsigned index = 0; index < count; ++index) {

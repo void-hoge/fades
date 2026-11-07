@@ -1,7 +1,7 @@
 # PS / Linux ソフトウェア
 
-ABI v2 は V4L2 風の **QBUF / DQBUF と1つの poll fd** で数独を継続処理する。
-入力と出力は独立した mmap バッファキュー。1スレッドで使える。
+ABI v2 は **入力用と出力用の2つのバッファキューを1つの poll fd で管理する**。
+各キューは mmap バッファを QBUF / DQBUF で循環させ、1スレッドで継続処理できる。
 
 ## ビルド
 
@@ -187,6 +187,17 @@ status != 0 の出力セルと、全出力の予約領域はゼロ。
 
 ## ツール
 
+|ツール|用途|入力|出力・終了条件|
+|---|---|---|---|
+|`fades_stream`|ioctl の利用例・ファイル間の数独処理|ID を割り当て済みの64 byte packed record|結果 record をファイルに書き、入力 EOF 後に全件回収して終了|
+|`fades_verify`|全結果の正当性確認|テキスト問題集・転送件数|CPU 参照解と全件照合し、指定件数で終了|
+|`fades_benchmark`|継続投入の性能測定|テキスト問題集・測定秒数|入力を循環投入し、期限後に排出して速度・検証結果を表示|
+
+`fades_stream.cpp` は QBUF/DQBUF/poll の操作を明示する。
+`fades_benchmark.cpp` は同じ ioctl を使う共通関数 `run_streaming_session` に
+入力供給と結果回収の処理を渡し、問題のエンコード・一意 ID 生成・時間計測・前後の解検証を行う。
+`fades_stream` のファイル入出力時間は、このベンチマークの測定範囲には含めない。
+
 ```sh
 # packed 64-byte records をファイル間でストリーム処理
 build/kv260-ps/host/fades_stream input.bin output.bin 10000
@@ -229,9 +240,9 @@ ID はセッション内で単調増加し、未完了要求との重複を避�
 中間の全解は CPU で逐一照合しない。解なし・複数解の入力も使用可能。
 
 高速な入力供給では、エンコード済み問題を通常の cached メモリーに保持し、
-`fades_stream.hpp` の `copy_records_with_ids(tx_slot, source, count, first_id)` を使える。
+`fades_stream.hpp` の `copy_records_with_ids(destination, source, count, first_id)` を使える。
 ID を付けながら DMA mapping へ一度だけ書き、AArch64 では NEON の全幅 store と
-先読みを使う。source と target は重ねず、CPU 所有の TX slot にだけ書く。
+先読みを使う。source と destination は重ねず、CPU 所有の TX slot にだけ書く。
 KV260 ネイティブビルドでは Cortex-A53 向けにコンパイルする。
 
 実時間による排出込み速度、期限内に観測した packet 完了件数と速度、最終排出時間、

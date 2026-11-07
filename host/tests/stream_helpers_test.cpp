@@ -183,20 +183,20 @@ int main() try {
     expect(mock.streamoff_calls == 1, "Destructor did not stop its stream exactly once");
 
     std::array<uint8_t, 3 * 64> source{};
-    std::array<uint8_t, 3 * 64> target{};
+    std::array<uint8_t, 3 * 64> destination{};
     for (size_t index = 0; index < source.size(); ++index) {
         source[index] = uint8_t(index);
     }
     constexpr uint64_t first_id = 0xabcdef01fffffffeULL;
-    fades::copy_records_with_ids(target.data(), source.data(), 3, first_id);
+    fades::copy_records_with_ids(destination.data(), source.data(), 3, first_id);
     for (unsigned record = 0; record < 3; ++record) {
         uint64_t id = 0;
         for (unsigned byte = 0; byte < 8; ++byte) {
-            id |= uint64_t(target[record * 64 + byte]) << (8 * byte);
+            id |= uint64_t(destination[record * 64 + byte]) << (8 * byte);
         }
         expect(id == first_id + record, "Incorrect copied ID across a 32-bit carry");
         for (unsigned byte = 8; byte < 64; ++byte) {
-            expect(target[record * 64 + byte] == source[record * 64 + byte],
+            expect(destination[record * 64 + byte] == source[record * 64 + byte],
                    "ID copy changed a payload/reserved byte");
         }
     }

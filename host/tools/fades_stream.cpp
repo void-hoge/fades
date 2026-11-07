@@ -1,5 +1,8 @@
-// Minimal single-thread ioctl example: packed 64-byte input records -> results.
-// Results are completion ordered; use request IDs, not file position, to match.
+// File-to-file ioctl example: read packed 64-byte inputs with caller-assigned
+// IDs, solve each once, and write completion-ordered results until input EOF
+// and final drain. Unlike fades_benchmark.cpp, this tool does not encode a text
+// corpus, repeat it for a duration, measure throughput, or check result contents.
+// Use request IDs, not file position, to match results to inputs.
 #include "fades_stream.hpp"
 #include <fstream>
 #include <iostream>

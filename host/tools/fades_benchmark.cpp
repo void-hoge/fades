@@ -1,5 +1,8 @@
-// Duration-driven single-threaded streaming benchmark. Initial preparation,
-// CPU reference and warmup/final full-content checks are outside timing.
+// Performance tool: load a text puzzle corpus and replay it until a deadline,
+// generating unique IDs and reporting throughput. Results are validated rather
+// than written to a record file. Uses the same ioctls as fades_stream.cpp via
+// run_streaming_session. Initial preparation, CPU reference and warmup/final
+// full-content checks are outside timing.
 #include "fades_stream.hpp"
 #include "sudoku.hpp"
 #include <array>
@@ -86,12 +89,12 @@ int main(int argc, char** argv) try {
 
     // Populate exactly count input records, cycling the corpus and assigning
     // IDs id_base + first_record + offset. Invoked with CPU-owned TX memory.
-    auto write_input_buffer = [&](uint8_t* target, unsigned count, uint64_t first_record) {
+    auto write_input_buffer = [&](uint8_t* destination, unsigned count, uint64_t first_record) {
         unsigned copied = 0;
         while (copied < count) {
             size_t source_offset = (first_record + copied) % corpus.size();
             unsigned chunk = unsigned(std::min<size_t>(count - copied, corpus.size() - source_offset));
-            fades::copy_records_with_ids(target + size_t(copied) * 64, corpus[source_offset].data(),
+            fades::copy_records_with_ids(destination + size_t(copied) * 64, corpus[source_offset].data(),
                                          chunk, id_base + first_record + copied);
             copied += chunk;
         }
