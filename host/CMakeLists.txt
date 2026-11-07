@@ -35,6 +35,13 @@ if(FADES_BUILD_DRIVER)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(stream_helpers_test tests/stream_helpers_test.cpp)
+    target_include_directories(stream_helpers_test PRIVATE include)
+    target_compile_features(stream_helpers_test PRIVATE cxx_std_20)
+    target_compile_options(stream_helpers_test PRIVATE -Wall -Wextra -Werror)
+    target_link_options(stream_helpers_test PRIVATE
+        -Wl,--wrap=open,--wrap=close,--wrap=ioctl,--wrap=mmap,--wrap=munmap)
+    add_test(NAME host-stream-helpers COMMAND stream_helpers_test)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME host-input COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_input.py" "$<TARGET_FILE_DIR:fades_verify>")

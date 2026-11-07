@@ -78,3 +78,21 @@ The optimized operation is shared as `fades::copy_records_with_ids` in
 - Hard 1106 `375 1 1`: all 375 warmup and 375 measured results checked.
 
 Local raw command output is retained in `results/streaming16/kv260.log`.
+
+## C++ API review follow-up
+
+After converting Device to constructor-initialized RAII, documenting the API,
+renaming the session/result helpers and replacing assertion-style error checks,
+the host and KV260 builds and both host CTests passed. The new helper test injects
+open/INFO/ABI/TX-mmap/RX-mmap failures, verifies rollback and destructor cleanup,
+and distinguishes empty completion queues from ioctl errors. It also checks the
+copy helper's payload preservation and IDs across a 32-bit carry on x86 and Arm.
+The ioctl example's 400,005 records and the continuous full-set/mixed verifier
+checks passed again on KV260, with no new dmesg output.
+
+A first 10-second spot check was 27.522271 Mproblem/s. The subsequent three
+10-second runs were **27.582902 / 27.619979 / 27.620254 Mproblem/s**, median
+**27.619979 Mproblem/s**. All had Errors=0 and passed the 80,000-record warmup
+and final resident-buffer checks. This retains the approximately 27.62
+Mproblem/s throughput of the original implementation. Raw follow-up logs are
+`results/streaming16/review-validation.log` and `review-benchmark.log`.

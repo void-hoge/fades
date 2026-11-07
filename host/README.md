@@ -35,6 +35,9 @@ ABI version は **2**。旧 RUN ABI は廃止した。
 
 各領域は 1 MiB × 8 slot = 8 MiB。各 slot の先頭は
 `mapping + index * info.slot_bytes`。1レコード64 byte、1 slot 最大16,384問。
+ここで **slot は循環させるバッファ1面**の意味で、コア内の処理枠ではない。
+例えば「TX の index=3」は4番目の入力バッファ、「RX の index=3」は
+4番目の結果バッファを指す。両者が同じ問題群を含むという意味ではない。
 MAP_SHARED で領域全体を mmap する。CPU の手動 cache flush は不要。
 DMA バッファは非コヒーレント HP ポート向けの coherent DMA mapping で公開する。
 
@@ -136,6 +139,36 @@ CPU 所有に戻す。次回は必要な RX/TX を再登録して STREAMON す�
 異常後も両 DMA と全 solver/FIFO をリセットしてから再開始する。
 close も停止処理を行う。mmap は file 参照を保持するため、最後の mapping も閉じて
 から排他的 open が解放される。待機 timeout はユーザーの poll で指定する。
+
+### C++ の共通ヘルパー
+
+`include/fades_stream.hpp` の `Device` は fd と mapping を所有する RAII クラス。
+**コンストラクタで open・INFO 検証・TX/RX mmap まで完了**し、途中で失敗すれば
+取得済みの資源を解放して例外を送出する。デストラクタは処理停止・unmap・close を行う。
+内部状態は private とし、`native_handle()` / `info()` で fd と構成を参照する。
+
+- `buffer_data(queue, index)`: 指定したバッファ1面の先頭を取得する。CPU 所有時だけアクセスする。
+- `enqueue(queue, index, records)`: QBUF で登録する。
+- `dequeue(queue, buffer)`: DQBUF で完了を回収する。EAGAIN だけ false、それ以外の失敗は例外。
+
+verify/benchmark 共通の `run_streaming_session` は、初期登録から開始・補充・結果回収・
+入力締め切り・最終排出・統計取得・停止までを、1スレッドで実行する関数。
+次の2つのコールバックを呼び出す。
+
+```cpp
+// CPU所有のTX領域へ count 問を必ず書く。first_record は通算0始まりの番号。
+// request ID の割り当てはこのコールバックの責任。
+void write_input_buffer(uint8_t* data, unsigned count, uint64_t first_record);
+
+// 完了したRXバッファの count 件を読む。Device::buffer_data(RX, index)で参照。
+// 戻った直後に再登録されるため、参照を後まで保持しない。
+void read_output_buffer(unsigned index, unsigned count);
+```
+
+型パラメーターは、この署名に合うラムダ／関数オブジェクトの型を受け取るためのもの。
+コールバックはどちらも呼び出し元スレッドで同期実行される。
+戻り値 `StreamingResult` は投入／完了レコード数、完了パケット数、秒単位の時間、
+最終 PL 統計を持つ値オブジェクト。各メンバーの単位・計測範囲はヘッダーの docstring を参照。
 
 ## レコード形式
 
