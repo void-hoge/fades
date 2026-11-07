@@ -14,7 +14,10 @@ PS の Linux プログラムから DDR / AXI DMA 経由で問題を投入し、I
 ## 1. 実機を使う
 
 FPGA アプリとドライバーをロード済みの KV260 上で実行する。
-提供する入口は、時間指定の性能測定と、件数指定の正当性確認の2つ。
+時間指定の性能測定、件数指定の正当性確認、packed record のストリーム処理を提供する。
+API は入力・出力それぞれの mmap バッファに QBUF/DQBUF を行う方式。
+**1つの fd の poll で両方の完了を待ち、1スレッドで継続投入・回収できる。**
+バッファ境界で全件排出・リセットを行わない。ioctl の利用例は [host/README.md](host/README.md)。
 
 ```sh
 cmake --preset kv260-ps                            # KV260上でconfigure
@@ -34,6 +37,7 @@ build/kv260-ps/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
 ```text
 fades_benchmark 問題ファイル 測定秒数
 fades_verify 問題ファイル 1パケットの問題数 DMAスロット数 反復回数 [mixed]
+fades_stream 入力packed-recordファイル 出力packed-recordファイル [1バッファの問題数]
 ```
 
 **`8193 6 1` の `6` はDMAスロット数であり、コア数ではない。**
@@ -47,7 +51,8 @@ fades_verify 問題ファイル 1パケットの問題数 DMAスロット数 反
 
 入力は **1行81文字、空欄 `.`、ヒント `1〜9`、セル間の空白なし**。LF/CRLF に対応。
 プログラムは計測前後に独立 CPU 参照を使って検証する。
-通常の「問題ファイルを解ファイルへ変換する」コマンドは、現在の提供物には含まない。
+`fades_stream` は64 byteのpacked recordを読み書きし、結果は完了順で返す。
+テキスト問題ファイルを解テキストへ変換するものではない。
 引数・データ形式・検証範囲は [host/README.md](host/README.md)。
 
 ## 2. 実機を準備する
@@ -184,6 +189,13 @@ ctest --test-dir build/host-1core --output-on-failure -L '^fades$'
 `build/` は生成物、`results/` は生ログ・実験履歴、`docs/` はローカル設計メモ。
 
 ## 実測
+
+ABI v2 の継続投入は、入力コピー・ID 更新込みで **27.620716 Mproblem/s**
+（10秒×3回の中央値）。180秒で **4,971,960,000件**を処理し Errors=0。
+1万問 × 8面、6コア約115.385 MHz / DMA 187.5 MHz、最終排出を含む。
+測定範囲と検証結果は [host/STREAMING_RESULTS.md](host/STREAMING_RESULTS.md)。
+
+以下は旧 ABI v1 の準備済み DDR 反復測定で、測定条件が異なる。
 
 KV260 実機で 17 ヒント 49,158 問と Hard 1106 の 375 問を CPU 参照解と照合済み。
 2026-11-07、通常の `kv260-pl` ビルド（Vivado 2024.2、6コア、並列数4）で生成した回路を使用。

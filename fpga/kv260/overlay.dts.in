@@ -10,40 +10,19 @@
         __overlay__ {
             #address-cells = <2>;
             #size-cells = <2>;
-            fades_dma: dma-controller@a0000000 {
-                compatible = "xlnx,axi-dma-1.00.a";
-                reg = <0x0 0xa0000000 0x0 0x10000>;
-                #dma-cells = <1>;
-                xlnx,addrwidth = <40>;
-                xlnx,include-sg;
-                xlnx,sg-length-width = <23>;
-                clocks = <&zynqmp_clk 71>, <&zynqmp_clk 71>,
-                         <&zynqmp_clk 71>, <&zynqmp_clk 71>;
-                clock-names = "s_axi_lite_aclk", "m_axi_sg_aclk",
-                              "m_axi_mm2s_aclk", "m_axi_s2mm_aclk";
+            sudoku@a0010000 {
+                compatible = "fades,solver-2.0";
+                reg = <0x0 0xa0010000 0x0 0x1000>,
+                      <0x0 0xa0000000 0x0 0x10000>;
+                reg-names = "solver", "dma";
+                clocks = <&zynqmp_clk 71>, <&zynqmp_clk 72>;
+                clock-names = "dma", "core";
                 assigned-clocks = <&zynqmp_clk 71>, <&zynqmp_clk 72>;
                 assigned-clock-rates = <@dma_hz@>, <@core_hz@>;
                 interrupt-parent = <&gic>;
-                dma-channel-mm2s {
-                    compatible = "xlnx,axi-dma-mm2s-channel";
-                    interrupts = <0 89 4>;
-                    xlnx,datawidth = <128>;
-                    xlnx,device-id = <0>;
-                };
-                dma-channel-s2mm {
-                    compatible = "xlnx,axi-dma-s2mm-channel";
-                    interrupts = <0 90 4>;
-                    xlnx,datawidth = <128>;
-                    xlnx,device-id = <0>;
-                };
-            };
-            sudoku@a0010000 {
-                compatible = "fades,solver-1.0";
-                reg = <0x0 0xa0010000 0x0 0x1000>;
-                clocks = <&zynqmp_clk 71>, <&zynqmp_clk 72>;
-                clock-names = "dma", "core";
-                dmas = <&fades_dma 0>, <&fades_dma 1>;
-                dma-names = "tx", "rx";
+                interrupts = <0 89 4>, <0 90 4>;
+                interrupt-names = "tx", "rx";
+                /* HP ports are noncoherent: deliberately no dma-coherent. */
             };
         };
     };

@@ -11,8 +11,10 @@ module fades #(
     input wire reset,
     /* verilator lint_on SYNCASYNCNET */
     input wire enable,
-    // Held constant throughout a run, programmed while reset is asserted.
-    input wire [31:0] total_records, packet_records,
+    // DMA-domain output packet commands, posted before the corresponding TX.
+    input wire [31:0] packet_records,
+    input wire packet_valid,
+    output wire packet_ready,
     input wire [127:0] s_axis_tdata,
     input wire [15:0] s_axis_tkeep,
     input wire s_axis_tvalid, s_axis_tlast,
@@ -47,10 +49,6 @@ module fades #(
     end
     wire dma_reset = dma_reset_sync[2];
     wire core_reset = core_reset_sync[2];
-    // Configuration is held throughout reset and the complete run. Synchronize
-    // it before use in the core domain; reset release provides the settling time.
-    (* ASYNC_REG = "TRUE" *) logic [31:0] total_meta, total_core;
-    always @(posedge core_clk) begin total_meta <= total_records; total_core <= total_meta; end
     logic [383:0] assembly;
     logic [1:0] input_beat;
     wire [387:0] queue_data;
@@ -194,18 +192,17 @@ module fades #(
             end
         end
     end
-    logic work_started, work_done;
+    logic work_started;
     always @(posedge core_clk) begin
         if (core_reset) begin
             rr_head <= 0; result_head <= 0;
             result_buffer <= 0; result_buffer_valid <= 0;
             dispatch_count <= 0; collected_count <= 0; queue_empty_cycles <= 0;
-            processing_cycles <= 0; work_started <= 0; work_done <= 0;
+            processing_cycles <= 0; work_started <= 0;
         end else begin
-            if (!work_done && (work_started || dispatch)) begin
+            if (work_started || dispatch) begin
                 work_started <= 1;
                 processing_cycles <= processing_cycles+1'b1;
-                if (collect && collected_count+1'b1 == {32'b0,total_core}) work_done <= 1;
             end
             if (!queue_valid) queue_empty_cycles <= queue_empty_cycles + 1'b1;
             if (dispatch) begin
@@ -236,11 +233,29 @@ module fades #(
     );
     logic [1:0] output_beat;
     logic [31:0] packet_position;
+    // Sixteen commands cover all eight outstanding receive slots with margin.
+    logic [31:0] packet_lengths [0:15];
+    logic [3:0] packet_head, packet_tail;
+    logic [4:0] packet_count;
+    assign packet_ready = !dma_reset && packet_count < 16;
+    wire packet_push = packet_valid && packet_ready;
+    wire packet_pop = m_axis_tvalid && m_axis_tready && m_axis_tlast;
+    always @(posedge dma_clk) begin
+        if (dma_reset) begin packet_head <= 0; packet_tail <= 0; packet_count <= 0; end
+        else begin
+            packet_count <= packet_count + 5'(packet_push) - 5'(packet_pop);
+            if (packet_push) begin
+                packet_lengths[packet_tail] <= packet_records;
+                packet_tail <= packet_tail + 1'b1;
+            end
+            if (packet_pop) packet_head <= packet_head + 1'b1;
+        end
+    end
     assign m_axis_tdata = output_record[128*output_beat +: 128];
     assign m_axis_tkeep = 16'hffff;
-    assign m_axis_tvalid = !dma_reset && output_record_valid && output_count < {32'b0,total_records};
-    assign m_axis_tlast = output_beat == 3 &&
-        (packet_position+1'b1 == packet_records || output_count+1'b1 == {32'b0,total_records});
+    assign m_axis_tvalid = !dma_reset && output_record_valid && packet_count != 0;
+    assign m_axis_tlast = output_beat == 3 && packet_count != 0 &&
+        packet_position+1'b1 == packet_lengths[packet_head];
     assign output_record_ready = m_axis_tvalid && m_axis_tready && output_beat == 3;
     always @(posedge dma_clk) begin
         if (dma_reset) begin

@@ -27,18 +27,25 @@ struct Sim {
         d.eval();
     }
     bool dma_edge() const { return (t+1)%(2*dma_half)==dma_half; }
-    void reset(unsigned total, unsigned packet) {
+    void reset() {
         d.reset=1; d.enable=0; d.s_axis_tvalid=0; d.m_axis_tready=0;
-        d.total_records=total; d.packet_records=packet; d.eval();
+        d.packet_valid=0; d.packet_records=0; d.eval();
         for (unsigned i=0;i<180;++i) advance();
         d.reset=0; d.eval();
     }
 };
 static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool stress) {
     auto& d=s.d;
-    s.reset(ps.size(),packet);
+    s.reset();
     const auto start=s.t;
-    unsigned sent=0, beat=0, got=0, obeat=0;
+    unsigned sent=0, beat=0, got=0, obeat=0, commanded=0;
+    unsigned command_index=0, output_packet=0, output_position=0;
+    std::vector<unsigned> lengths;
+    for(unsigned total=0;total<ps.size();) {
+        const unsigned sizes[]={1,17,3,31};
+        unsigned n=std::min<unsigned>(stress ? sizes[lengths.size()%4] : packet,ps.size()-total);
+        lengths.push_back(n);total+=n;
+    }
     Record answer{};
     std::vector<bool> seen(ps.size());
     bool held=false;
@@ -49,6 +56,10 @@ static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool st
         const auto age=s.t-start;
         d.enable=!stress || (age>20000 && s.random()%37!=0);
         if (s.dma_edge()) {
+            if (!d.packet_valid && commanded<ps.size()) {
+                d.packet_records=lengths[command_index];
+                d.packet_valid=1;
+            }
             if (!d.s_axis_tvalid && sent<ps.size() && (!stress || s.random()%4)) {
                 for(unsigned w=0;w<4;++w) d.s_axis_tdata[w]=ps[sent].record[beat*4+w];
                 d.s_axis_tkeep=0xffff;
@@ -66,10 +77,11 @@ static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool st
             if(held) { for(unsigned w=0;w<4;++w) held_data[w]=d.m_axis_tdata[w]; held_last=d.m_axis_tlast; }
             bool tx=d.s_axis_tvalid && d.s_axis_tready;
             bool rx=d.m_axis_tvalid && d.m_axis_tready;
+            bool command=d.packet_valid && d.packet_ready;
             if(rx) {
                 check(d.m_axis_tkeep==0xffff,"Bad output keep");
                 for(unsigned w=0;w<4;++w) answer[obeat*4+w]=d.m_axis_tdata[w];
-                check(bool(d.m_axis_tlast)==(obeat==3 && (got%packet==packet-1 || got+1==ps.size())),"Bad packet boundary");
+                check(bool(d.m_axis_tlast)==(obeat==3 && output_position+1==lengths[output_packet]),"Bad packet boundary");
                 if(++obeat==4) {
                     obeat=0;
                     uint64_t rid=uint64_t(answer[0]) | uint64_t(answer[1])<<32;
@@ -90,9 +102,11 @@ static void run(Sim& s, const std::vector<Problem>& ps, unsigned packet, bool st
                     } else for(unsigned c=0;c<81;++c) check(nibble(answer,72+4*c)==0,"Nonzero unsolved cells");
                     for(unsigned b=396;b<512;++b) check(((answer[b/32]>>(b%32))&1)==0,"Reserved bits nonzero");
                     ++got;
+                    if(++output_position==lengths[output_packet]) {output_position=0;++output_packet;}
                 }
             }
             s.advance();
+            if(command) {commanded+=d.packet_records;++command_index;d.packet_valid=0;d.eval();}
             if(tx) { d.s_axis_tvalid=0; if(++beat==4) {beat=0; ++sent;} d.eval(); }
         } else s.advance();
         check(!d.framing_error,"Unexpected framing error");
@@ -150,14 +164,14 @@ int main(int argc,char** argv) try {
     Sim s;
     run(s,stress,17,true);
     // Reset with an incomplete input and unconsumed output in flight.
-    s.reset(1000,7); s.d.enable=1;s.d.s_axis_tvalid=1;s.d.s_axis_tkeep=0xffff;s.d.s_axis_tlast=0;
+    s.reset(); s.d.packet_valid=1;s.d.packet_records=7;s.d.enable=1;s.d.s_axis_tvalid=1;s.d.s_axis_tkeep=0xffff;s.d.s_axis_tlast=0;
     for(unsigned w=0;w<4;++w)s.d.s_axis_tdata[w]=0;
     for(unsigned i=0;i<10000;++i) s.advance();
     check(s.d.m_axis_tvalid && s.d.output_count==0,"Reset case did not contain stalled results");
     run(s,ps,16384,false);
     // Framing errors are sticky and require a global reset.
     for(unsigned mode=0;mode<2;++mode) {
-        s.reset(1,1); s.d.s_axis_tvalid=1;
+        s.reset(); s.d.s_axis_tvalid=1;
         s.d.s_axis_tkeep=mode?0xfffe:0xffff;s.d.s_axis_tlast=!mode;
         for(unsigned i=0;i<300;++i) s.advance();
         check(s.d.framing_error && !s.d.s_axis_tready && s.d.accepted_count==0,"Framing fault handling failed");

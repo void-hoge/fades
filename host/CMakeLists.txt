@@ -1,8 +1,11 @@
-foreach(tool IN ITEMS fades_verify fades_benchmark)
+foreach(tool IN ITEMS fades_verify fades_benchmark fades_stream)
     add_executable(${tool} tools/${tool}.cpp)
     target_link_libraries(${tool} PRIVATE sudoku_reference)
     target_include_directories(${tool} PRIVATE include)
     target_compile_options(${tool} PRIVATE -Wall -Wextra -Werror)
+    if(FADES_BUILD_DRIVER AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        target_compile_options(${tool} PRIVATE -mcpu=cortex-a53)
+    endif()
 endforeach()
 
 if(FADES_BUILD_DRIVER)

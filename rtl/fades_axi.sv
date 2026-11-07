@@ -26,7 +26,9 @@ module fades_axi #(
     output wire m_axis_tvalid, m_axis_tlast, input wire m_axis_tready
 );
     logic soft_reset, run_enable;
-    logic [31:0] total_records, packet_records;
+    logic [31:0] packet_records;
+    logic packet_valid;
+    wire packet_ready;
     wire reset = !aresetn || soft_reset;
     (* ASYNC_REG = "TRUE" *) logic [1:0] enable_sync = 0;
     // Each stream clock domain generates its own synchronous reset release.
@@ -50,7 +52,8 @@ module fades_axi #(
 `endif
     fades #(.CORES(CORES)) stream (
         .dma_clk(dma_clk), .core_clk(core_clk), .reset(reset),
-        .enable(enable_sync[1]), .total_records(total_records), .packet_records(packet_records),
+        .enable(enable_sync[1]), .packet_records(packet_records),
+        .packet_valid(packet_valid), .packet_ready(packet_ready),
         .s_axis_tdata(s_axis_tdata), .s_axis_tkeep(s_axis_tkeep),
         .s_axis_tvalid(s_axis_tvalid), .s_axis_tlast(s_axis_tlast), .s_axis_tready(s_axis_tready),
         .m_axis_tdata(m_axis_tdata), .m_axis_tkeep(m_axis_tkeep),
@@ -98,11 +101,13 @@ module fades_axi #(
     wire unused_prot = ^{s_axi_awprot,s_axi_arprot};
     always @(posedge dma_clk) begin
         if (!aresetn) begin
-            soft_reset <= 1; run_enable <= 0; total_records <= 0; packet_records <= 0;
+            soft_reset <= 1; run_enable <= 0; packet_records <= 0; packet_valid <= 0;
             aw_pending <= 0; w_pending <= 0; awaddr <= 0; wdata <= 0; wstrb <= 0;
             s_axi_bvalid <= 0; s_axi_rvalid <= 0; s_axi_rdata <= 0;
             snapshot_req <= 0; ack_sync <= 0; snapshot_pending <= 0; snapshot <= 0;
         end else begin
+            if (soft_reset) packet_valid <= 0;
+            if (packet_valid && packet_ready) packet_valid <= 0;
             ack_sync <= {ack_sync[0],snapshot_ack};
             if (snapshot_pending && ack_sync[1] == snapshot_req) begin
                 snapshot <= {core_snapshot[2559:1728],queue_peak,core_snapshot[1727:0],input_stall,emitted,accepted};
@@ -115,8 +120,9 @@ module fades_axi #(
                 aw_pending <= 0; w_pending <= 0; s_axi_bvalid <= 1;
                 case (awaddr)
                     12'h000: if (wstrb[0]) begin soft_reset <= wdata[0]; run_enable <= wdata[1]; end
-                    12'h004: if (soft_reset) for(integer b=0;b<4;b=b+1) if(wstrb[b]) total_records[8*b +: 8] <= wdata[8*b +: 8];
-                    12'h008: if (soft_reset) for(integer b=0;b<4;b=b+1) if(wstrb[b]) packet_records[8*b +: 8] <= wdata[8*b +: 8];
+                    12'h008: if (!soft_reset && !packet_valid && packet_ready && wstrb == 4'hf && wdata != 0) begin
+                        packet_records <= wdata; packet_valid <= 1;
+                    end
                     12'h010: if (wstrb[0] && wdata[0] && !snapshot_pending) begin snapshot_req <= !snapshot_req; snapshot_pending <= 1; end
                     default: ;
                 endcase
@@ -126,10 +132,10 @@ module fades_axi #(
                 s_axi_rvalid <= 1;
                 case (s_axi_araddr)
                     12'h000: s_axi_rdata <= {30'b0,run_enable,soft_reset};
-                    12'h004: s_axi_rdata <= total_records;
+                    12'h004: s_axi_rdata <= 0;
                     12'h008: s_axi_rdata <= packet_records;
-                    12'h00c: s_axi_rdata <= {30'b0,snapshot_pending,framing_error};
-                    12'h014: s_axi_rdata <= 32'h46414401;
+                    12'h00c: s_axi_rdata <= {29'b0,(!packet_valid && packet_ready),snapshot_pending,framing_error};
+                    12'h014: s_axi_rdata <= 32'h46414402;
                     default: begin
                         s_axi_rdata <= 0;
                         if(s_axi_araddr >= 12'h100 && s_axi_araddr < 12'h260 && s_axi_araddr[1:0] == 0)

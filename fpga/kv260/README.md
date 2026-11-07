@@ -132,6 +132,7 @@ xmutil listapps
 insmod build/kv260-ps/host/driver/fades.ko
 ls -l /dev/fades
 python3 host/tests/check_abi.py
+python3 host/tests/check_stream.py
 build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 1 1 1
 build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 1024 3 1 mixed
 build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 8193 6 1
@@ -142,8 +143,10 @@ build/kv260-ps/host/fades_benchmark sim/data/17puz49158.txt 10
 `xmutil` の終了値に加え、listapps、デバイスの存在、機能試験でロードを確認する。
 デバイスが出ない場合や転送異常時は root で `dmesg` を確認する。
 転送中断・タイムアウト時は、プロセスを終了してモジュールと FPGA アプリを再ロードする。
-通常の DMA packet の TLAST ではキューやコアをリセットしないが、ホストの RUN は
-全 round を排出し、次の round の開始時に全体 reset を実施する。
+ABI v2 は STREAMON で一度だけ初期化し、QBUF/DQBUF で継続処理する。
+通常の DMA packet の TLAST でキューやコアをリセットしない。
+STREAMOFF で両 DMA と全 solver/FIFO を reset してから再開始できる。
+DMA MMIO・IRQ は FADES ドライバーが直接所有し、overlay に別 DMA provider は作らない。
 
 測定結果には回路・クロック・転送サイズ・計測範囲を添えて保存する。
 
@@ -152,10 +155,10 @@ build/kv260-ps/host/fades_benchmark sim/data/17puz49158.txt 10
 |offset|意味|
 |---|---|
 |0x000|bit0 reset（初期値1）、bit1 enable|
-|0x004 / 0x008|総レコード件数 / 出力packet件数。reset中に設定|
-|0x00c|bit0 sticky framing error、bit1 snapshot pending|
+|0x004 / 0x008|予約 / 出力packet件数の enqueue|
+|0x00c|bit0 sticky framing error、bit1 snapshot pending、bit2 packet command 書き込み可能|
 |0x010|bit0=1書き込みでcounter snapshotを要求|
-|0x014|identity `0x46414401`|
+|0x014|identity `0x46414402`|
 |0x100〜0x25f|44個の64-bit counter、下位32bitが先|
 
 counter順は `host/include/fades_ioctl.h` のコメントを参照。
