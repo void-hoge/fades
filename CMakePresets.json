@@ -10,7 +10,6 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "BUILD_TESTING": "OFF",
-        "FADES_BUILD_HOST": "OFF",
         "FADES_BUILD_DRIVER": "OFF",
         "FADES_BUILD_SIM": "OFF",
         "FADES_BUILD_FPGA": "OFF"
@@ -18,13 +17,13 @@
     },
     {
       "name": "host", "inherits": "base",
-      "displayName": "Development tools and RTL simulation",
-      "cacheVariables": { "FADES_BUILD_HOST": "ON", "FADES_BUILD_SIM": "ON", "BUILD_TESTING": "ON" }
+      "displayName": "CPU reference and RTL simulation",
+      "cacheVariables": { "FADES_BUILD_SIM": "ON", "BUILD_TESTING": "ON" }
     },
     {
       "name": "kv260-ps", "inherits": "base",
-      "displayName": "KV260 userspace tools and kernel module (native build)",
-      "cacheVariables": { "FADES_BUILD_HOST": "ON", "FADES_BUILD_DRIVER": "ON", "BUILD_TESTING": "ON" }
+      "displayName": "KV260 kernel module (native build)",
+      "cacheVariables": { "FADES_BUILD_DRIVER": "ON" }
     },
     {
       "name": "kv260-pl", "inherits": "base",
@@ -38,7 +37,6 @@
     { "name": "kv260-ps", "configurePreset": "kv260-ps" }
   ],
   "testPresets": [
-    { "name": "host", "configurePreset": "host", "output": { "outputOnFailure": true } },
-    { "name": "kv260-ps", "configurePreset": "kv260-ps", "output": { "outputOnFailure": true } }
+    { "name": "host", "configurePreset": "host", "output": { "outputOnFailure": true } }
   ]
 }

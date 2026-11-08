@@ -11,52 +11,11 @@ PS の Linux プログラムから DDR / AXI DMA 経由で問題を投入し、I
 ビルド・検証の基本操作は **configure → build → test**。
 以下のコマンドは、対象の開発機またはKV260上のリポジトリルートで実行する。
 
-## 1. 実機を使う
+## 1. ホスト側
 
-FPGA アプリとドライバーをロード済みの KV260 上で実行する。
-時間指定の性能測定、件数指定の正当性確認、packed record のストリーム処理を提供する。
-API は `SolverStream` で固定容量スロットを一括投入・回収する方式。
-入力は全件受付または受付なし、出力はフルスロットまたは処理完了時の端数を返す。
-その下の `Device` が mmap バッファに QBUF/DQBUF を行う。
-**1つの fd の poll で両方の完了を待ち、1スレッドで継続投入・回収できる。**
-バッファ境界で全件排出・リセットを行わない。ioctl の利用例は [host/README.md](host/README.md)。
-
-```sh
-cmake --preset kv260-ps                            # KV260上でconfigure
-cmake --build --preset kv260-ps                     # C++ツールとドライバーを生成
-ctest --preset kv260-ps                            # 入力形式・不正入力の拒否試験
-
-# 10秒の性能測定
-build/kv260-ps/host/fades_benchmark sim/data/17puz49158.txt 10
-# 全49,158問の正当性確認
-build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 8193 6 1
-# 難問375問の正当性確認
-build/kv260-ps/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
-```
-
-引数は次のとおり。
-
-```text
-fades_benchmark 問題ファイル 測定秒数
-fades_verify 問題ファイル 1投入の問題数 論理スロット数 反復回数 [mixed]
-fades_stream 入力packed-recordファイル 出力packed-recordファイル [1バッファの問題数]
-```
-
-**`8193 6 1` の `6` は検証件数を定める論理スロット数であり、コア数ではない。**
-ユーザー向け `SolverStream` の入出力バッファは16,384問 × 8面に固定する。
-コア数は回路生成時の `FADES_CORES` で指定する。
-`mixed` を付けると、解なし・不正セルを含む入力も検証する。
-
-```text
-問題ファイル → PSプログラム → /dev/fades → fades.ko → DMA → FPGAのソルバー群
-                     ↑                 結果はDDRへDMAで返す ───────────┘
-```
-
-入力は **1行81文字、空欄 `.`、ヒント `1〜9`、セル間の空白なし**。LF/CRLF に対応。
-プログラムは計測前後に独立 CPU 参照を使って検証する。
-`fades_stream` は64 byteのpacked recordを読み書きし、結果は完了順で返す。
-テキスト問題ファイルを解テキストへ変換するものではない。
-引数・データ形式・検証範囲は [host/README.md](host/README.md)。
+ホストC++実装は削除した。要求仕様と、verify／streamが確認していたことは
+[host/README.md](host/README.md) にまとめている。
+Linuxドライバー・ioctl ABI・Pythonによる実機試験は `host/` にある。
 
 ## 2. 実機を準備する
 
@@ -93,10 +52,9 @@ KV260上で必要なパッケージを入れ、ソースを配置したリポジ
 sudo apt install build-essential cmake ninja-build python3 "linux-headers-$(uname -r)"
 cmake --preset kv260-ps
 cmake --build --preset kv260-ps
-ctest --preset kv260-ps
 ```
 
-通常のbuildでC++ツールと `build/kv260-ps/host/driver/fades.ko` を生成する。
+通常のbuildで `build/kv260-ps/host/driver/fades.ko` を生成する。
 実機自身のコンパイラーと実行中カーネルのヘッダーを使う。
 firmwareを配置し、`xmutil loadapp fades` と `insmod fades.ko` を実行すると **`/dev/fades`** が使える。
 転送・Arm64 ビルド・ロードの手順と、各ボード用ファイルの役割は
@@ -107,7 +65,7 @@ firmwareを配置し、`xmutil loadapp fades` と `insmod fades.ko` を実行す
 ```sh
 cmake --preset host -DFADES_CORES=6
 cmake --build --preset host
-ctest --preset host                         # 全試験（ホスト入力試験も含む）
+ctest --preset host                         # CPU参照・RTLの全試験
 ctest --preset host -L '^fades_core$'        # コア単体：全問題集・ストレス・構造合成・lint
 ctest --preset host -L '^fades$'             # 指定コア数で供給・回収を含む統合試験・lint
 ctest --preset host -L '^deduction_engine$'  # 推論の有向試験・形式検証
@@ -142,12 +100,12 @@ XPM試験にはVivadoが必要。`kv260-ps` ではRTL検証ツール・Vivado・
 
 | プリセット | 実行場所 | 通常のbuildで生成するもの | 出力先 |
 |------------|----------|--------------------------|--------|
-| `host` | 開発機 | C++ツール、CPU参照テスト、RTLシミュレーター・テストベンチ | `build/host/` |
+| `host` | 開発機 | CPU参照テスト、RTLシミュレーター・テストベンチ | `build/host/` |
 | `kv260-pl` | 開発機 | FPGA回路・検査レポート・firmwareパッケージ | `build/kv260-pl/` |
-| `kv260-ps` | KV260 | 実機用C++ツール・カーネルドライバー | `build/kv260-ps/` |
+| `kv260-ps` | KV260 | カーネルドライバー | `build/kv260-ps/` |
 
 各プリセットは `cmake --build --preset <名前>` で必要なものをまとめてビルドする。
-テストの実行は `ctest --preset host` または `ctest --preset kv260-ps` で行う。
+CPU参照・RTL試験は `ctest --preset host`、実機試験は `host/tests/` のPythonを使う。
 
 コア数はプリセットとは独立した `-DFADES_CORES=1`〜`6`（既定6）。
 ボードトップからコア群まで伝播し、シミュレーションにも同じ値を使う。
@@ -170,7 +128,6 @@ ctest --test-dir build/host-1core --output-on-failure -L '^fades$'
 
 **`-B` で出力先を変えた場合は、build・testでもそのディレクトリを指定する。**
 
-開発機用のC++実行ファイルは `build/host/host/`、実機用は `build/kv260-ps/host/` に生成する。
 ビルドの並列数を制限したい場合は `--parallel 4` などを追加できる。
 これはビルドジョブ数で、FPGAのコア数とは独立。省略時はNinjaの既定の並列度を使う。
 
@@ -181,18 +138,31 @@ ctest --test-dir build/host-1core --output-on-failure -L '^fades$'
 
 | 対象         | 読むファイル                                                        | 役割                                        |
 |--------------|---------------------------------------------------------------------|---------------------------------------------|
-| PS利用       | `host/tools/fades_benchmark.cpp` / `fades_verify.cpp`               | 性能測定 / 解の照合                         |
-| C++接続      | `host/include/fades_stream.hpp` → `fades_device.hpp`              | スロット入出力 → fd・mmap・QBUF/DQBUF      |
+| PS要求仕様   | `host/README.md`                                                  | 要求仕様と削除前の確認内容                  |
 | Linux接続    | `host/include/fades_ioctl.h` → `host/driver/fades.c`                | 公開ABI → バッファ・DMA・制御               |
 | ボード生成   | `fpga/kv260/scripts/build.tcl`                                      | PS・DMA・クロックの接続、実装、出力検査     |
 | PLの入口     | `rtl/fades_axi.sv` → `fades.sv`                                     | 制御 → 供給・ID管理・結果回収・コア群       |
 | 探索         | `rtl/fades_core.sv` → `deduction_engine.sv` / `branch_generator.sv` | 状態列・探索 → 推論 / 分岐                  |
 | クロック境界 | `rtl/async_queue.sv`                                                | XPM非同期FIFOと試験用モデル                 |
-| CPU照合      | `reference/sudoku.hpp`                                              | PSツールとRTL試験が共有する独立参照ソルバー |
+| CPU照合      | `reference/sudoku.hpp`                                              | RTL試験用の独立参照ソルバー                 |
 
 `build/` は生成物、`results/` は生ログ・実験履歴、`docs/` はローカル設計メモ。
 
 ## 実測
+
+以下は削除前のホストC++実装による測定記録。
+
+ABI v5 はTX/RX双方が可変のBufferPool API。既存HWを変更せず、入力コピー・ID更新・
+RAII投入／返却・最終排出込み、出力内容のCPU読み出しなしで **27.618329 Mproblem/s**
+（TX 8 / RX 64、10秒×3回の中央値）。TX 8 / RX 8では **27.512729 Mproblem/s**。
+全6回Errors=0、前後各131,072件の全解・ID検証PASS。
+TX/RX 65/65など、両方向がSGリング長を超える構成も実機で検証済み。
+
+ABI v4 は入力8面固定・出力面数可変。**出力内容をCPUで読まない**ベンチマークでは、
+入力コピー・一意ID更新・RX返却・最終排出込みで **27.618074 Mproblem/s**
+（RX 256面、10秒×3回の中央値）。RX 8面では **27.570465 Mproblem/s**。
+既存回路をそのまま使い、6回ともErrors=0、前後各131,072件の全解・ID検証PASS。
+条件と可変RX／背圧試験は [host/STREAMING_RESULTS.md](host/STREAMING_RESULTS.md) を参照。
 
 ABI v3 の固定スロット・ゼロコピー出力では、**全結果の64 byteをCPUで読む処理込み**で
 **18.753654 Mproblem/s**（10秒の最終確認、187,554,154件、Errors=0）。

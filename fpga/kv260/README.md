@@ -109,12 +109,11 @@ sudo apt install build-essential cmake ninja-build python3 "linux-headers-$(unam
 ```sh
 cmake --preset kv260-ps
 cmake --build --preset kv260-ps
-ctest --preset kv260-ps
 ```
 
-通常のbuildでC++ツールと `build/kv260-ps/host/driver/fades.ko` を生成する。
+通常のbuildで `build/kv260-ps/host/driver/fades.ko` を生成する。
 モジュールは実行中カーネルに対応したヘッダーでビルドする。Vivado・RTL検証ツールは不要。
-ヘッダーの場所や出力先の指定は [PS ソフトウェア](../../host/README.md) を参照。
+ヘッダーを明示する場合はconfigure時に `-DFADES_KERNEL_BUILD=/path/to/headers` を指定する。
 
 ## ロードと試験
 
@@ -133,12 +132,6 @@ insmod build/kv260-ps/host/driver/fades.ko
 ls -l /dev/fades
 python3 host/tests/check_abi.py
 python3 host/tests/check_stream.py
-build/kv260-ps/host/solver_stream_board_test
-build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 1 1 1
-build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 1024 3 1 mixed
-build/kv260-ps/host/fades_verify sim/data/17puz49158.txt 8193 6 1
-build/kv260-ps/host/fades_verify sim/data/HardestDatabase110626.txt 375 1 1
-build/kv260-ps/host/fades_benchmark sim/data/17puz49158.txt 10
 ```
 
 `xmutil` の終了値に加え、listapps、デバイスの存在、機能試験でロードを確認する。
