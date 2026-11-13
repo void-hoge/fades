@@ -80,7 +80,7 @@ def main():
         # Register both inputs before START: output must merge to 16384+1616.
         # No END_INPUT is needed to return the short slot. Then resume with 3
         # records in the same session and observe another idle tail.
-        data = (struct.pack("<Q", 0) + CELLS.to_bytes(41, "little") + bytes(15))
+        data = (struct.pack("<QB", 0, 0) + CELLS.to_bytes(41, "little") + bytes(14))
         for i in range(2):
             tx[i * stride:i * stride + 9000 * 64] = data * 9000
             queue(0, i, 9000)
@@ -133,7 +133,9 @@ def main():
                 elif rid % 13 == 2:  # duplicate givens -> status 1
                     cells = 0x11
                 struct.pack_into("<Q", data, j * 64, rid)
-                data[j * 64 + 8:j * 64 + 49] = cells.to_bytes(41, "little")
+                # Deliberately nonzero input status: HW must ignore it.
+                data[j * 64 + 8] = rid & 255
+                data[j * 64 + 9:j * 64 + 50] = cells.to_bytes(41, "little")
             tx[index * stride:index * stride + len(data)] = data
             queue(0, index, n)
             expect_errno(errno.EBUSY, lambda: queue(0, index, n))

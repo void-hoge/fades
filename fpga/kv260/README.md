@@ -154,7 +154,7 @@ DMA MMIO・IRQ は FADES ドライバーが直接所有し、overlay に別 DMA 
 |0x008|投入登録件数を加算。送信待ちを含め、TX開始前に通知。読み出しは累積件数の下位32bit|
 |0x00c|bit0 sticky framing error、bit1 snapshot pending|
 |0x010|bit0=1書き込みでcounter snapshotを要求|
-|0x014|identity `0x46414403`|
+|0x014|identity `0x46414404`（入出力共通のID / status / cells / reserve形式）|
 |0x018|投入登録累積件数の上位32bit|
 |0x100〜0x25f|44個の64-bit counter、下位32bitが先|
 

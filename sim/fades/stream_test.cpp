@@ -228,21 +228,27 @@ int main(int argc,char** argv) try {
     while(std::getline(f,line) && (!limit || ps.size()<limit)) {
         if(line.find_first_not_of(" \r\t")==std::string::npos) continue;
         Problem p; p.board=reference::parse(line);
-        for(unsigned c=0;c<81;++c) if(reference::single(p.board[c])) nibble(p.record,64+4*c,std::countr_zero(p.board[c])+1);
+        for(unsigned c=0;c<81;++c) if(reference::single(p.board[c])) nibble(p.record,72+4*c,std::countr_zero(p.board[c])+1);
         ps.push_back(p);
     }
     check(!ps.empty(),"Empty dataset");
     auto stress=std::vector<Problem>(ps.begin(),ps.begin()+std::min<size_t>(256,ps.size()));
     for(unsigned i=0;i<64;++i) {
         Problem p; p.board.fill(reference::all);
-        if(i%2==0) {nibble(p.record,64,1); nibble(p.record,68,1);p.status=1;}
-        else {nibble(p.record,64+4*(i%81),10+(i/2)%6);p.status=2;}
+        if(i%2==0) {nibble(p.record,72,1); nibble(p.record,76,1);p.status=1;}
+        else {nibble(p.record,72+4*(i%81),10+(i/2)%6);p.status=2;}
         stress.push_back(p);
     }
     Problem empty;empty.board.fill(reference::all);stress.push_back(empty);
     Problem solved;solved.board=reference::solve(ps.front().board).first;
-    for(unsigned c=0;c<81;++c)nibble(solved.record,64+4*c,std::countr_zero(solved.board[c])+1);
+    for(unsigned c=0;c<81;++c)nibble(solved.record,72+4*c,std::countr_zero(solved.board[c])+1);
     stress.push_back(solved);
+    // Input status and every reserved bit must be ignored, including the
+    // unused high nibble adjacent to the last cell in beat 3.
+    for(unsigned i=0;i<stress.size();++i) {
+        stress[i].record[2] |= (i+1)&255;
+        for(unsigned b=396;b<512;++b) stress[i].record[b/32] |= 1u<<(b%32);
+    }
     auto set_ids=[](auto& v) {for(unsigned i=0;i<v.size();++i) {v[i].record[0]=id(i);v[i].record[1]=id(i)>>32;}};
     set_ids(ps);set_ids(stress);
     Sim s;

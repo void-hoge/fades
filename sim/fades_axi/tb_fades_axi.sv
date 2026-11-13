@@ -52,7 +52,7 @@ module tb_fades_axi;
     initial begin
         repeat(20)@(negedge dma_clk);aresetn=1;
         read_reg(0,value);if(value!==1)$fatal(1,"Reset default");
-        read_reg(20,value);if(value!==32'h46414403)$fatal(1,"Version");
+        read_reg(20,value);if(value!==32'h46414404)$fatal(1,"Version");
         write_reg(0,2,2,1);
         read_reg(0,value);if(value!==1)$fatal(1,"Control byte strobe");
         write_reg(4,10000,15,0);

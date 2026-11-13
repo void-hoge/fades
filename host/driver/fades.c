@@ -481,7 +481,7 @@ static int fades_probe(struct platform_device *pdev)
     if (IS_ERR(d->control)) { ret = PTR_ERR(d->control); goto fail; }
     d->dma = devm_platform_ioremap_resource(pdev, 1);
     if (IS_ERR(d->dma)) { ret = PTR_ERR(d->dma); goto fail; }
-    if (readl(d->control + 20) != 0x46414403) { ret = -ENODEV; goto fail; }
+    if (readl(d->control + 20) != 0x46414404) { ret = -ENODEV; goto fail; }
     ret = hardware_reset(d);
     if (ret) goto fail;
     for (q = 0; q < 2; q++) {

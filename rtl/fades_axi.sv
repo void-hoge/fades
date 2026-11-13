@@ -131,7 +131,7 @@ module fades_axi #(
                     12'h004: s_axi_rdata <= slot_records;
                     12'h008: s_axi_rdata <= submitted_records[31:0];
                     12'h00c: s_axi_rdata <= {30'b0,snapshot_pending,framing_error};
-                    12'h014: s_axi_rdata <= 32'h46414403;
+                    12'h014: s_axi_rdata <= 32'h46414404;
                     12'h018: s_axi_rdata <= submitted_records[63:32];
                     default: begin
                         s_axi_rdata <= 0;

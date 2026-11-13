@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
-// Little-endian 64-byte records. Input: ID[63:0], cells[387:64].
-// Output: ID[63:0], status[71:64] (0 solved / 1 unsat / 2 invalid), cells[395:72].
+// Little-endian 64-byte records: ID[63:0], status[71:64], cells[395:72].
+// Input status is ignored. Output status: 0 solved / 1 unsat / 2 invalid.
 module fades #(
     parameter integer CORES = 6,
     parameter integer INFLIGHT_LIMIT = 2,
@@ -54,8 +54,9 @@ module fades #(
     wire [387:0] queue_data;
     wire queue_valid, queue_ready, queue_write_ready;
     wire [$clog2(FIFO_DEPTH):0] queue_write_count;
-    // Only the low four bits of beat 3 contain cells; drop reserved bits.
-    wire [387:0] assembled = {s_axis_tdata[3:0], assembly};
+    // Strip input status and reserved bits for the internal ID + cells format.
+    wire [387:0] assembled = {s_axis_tdata[11:0], assembly[383:72], assembly[63:0]};
+    wire unused_input_status = ^assembly[71:64];
     wire bad_beat = s_axis_tkeep != 16'hffff ||
         (s_axis_tlast && input_beat != 3);
     assign s_axis_tready = !dma_reset && !framing_error &&
