@@ -26,6 +26,7 @@ set(FADES_STREAM_RTL ${FADES_CORE_RTL}
     "${PROJECT_SOURCE_DIR}/rtl/fades.sv")
 set(FADES_AXI_RTL ${FADES_STREAM_RTL} "${PROJECT_SOURCE_DIR}/rtl/fades_axi.sv")
 if(FADES_BUILD_DRIVER)
+    enable_language(C)
     add_subdirectory(host)
 endif()
 if(FADES_BUILD_SIM)

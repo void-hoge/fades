@@ -111,7 +111,7 @@ cmake --preset kv260-ps
 cmake --build --preset kv260-ps
 ```
 
-通常のbuildで `build/kv260-ps/host/driver/fades.ko` を生成する。
+通常のbuildで `build/kv260-ps/host/driver/src/fades.ko` とCツール `build/kv260-ps/host/tools/fades_run` を生成する。
 モジュールは実行中カーネルに対応したヘッダーでビルドする。Vivado・RTL検証ツールは不要。
 ヘッダーを明示する場合はconfigure時に `-DFADES_KERNEL_BUILD=/path/to/headers` を指定する。
 
@@ -128,7 +128,7 @@ if test -d /sys/module/fades; then rmmod fades; fi
 xmutil unloadapp
 xmutil loadapp fades
 xmutil listapps
-insmod build/kv260-ps/host/driver/fades.ko
+insmod build/kv260-ps/host/driver/src/fades.ko
 ls -l /dev/fades
 python3 host/tests/check_abi.py
 python3 host/tests/check_stream.py
@@ -137,13 +137,33 @@ python3 host/tests/check_stream.py
 `xmutil` の終了値に加え、listapps、デバイスの存在、機能試験でロードを確認する。
 デバイスが出ない場合や転送異常時は root で `dmesg` を確認する。
 転送中断・タイムアウト時は、プロセスを終了してモジュールと FPGA アプリを再ロードする。
-ABI v3 は STREAMON でスロット容量16,384問を設定して一度だけ初期化し、継続処理する。
+ABI v6 は面数設定・個別mmap後、STREAMONで容量16,384問を設定して初期化し、継続処理する。
 出力は N 件または登録済みの処理がすべて完了した端数で区切る。
 通常の DMA packet の TLAST でキューやコアをリセットしない。
 STREAMOFF で両 DMA と全 solver/FIFO を reset してから再開始できる。
 DMA MMIO・IRQ は FADES ドライバーが直接所有し、overlay に別 DMA provider は作らない。
 
 測定結果には回路・クロック・転送サイズ・計測範囲を添えて保存する。
+
+### IOPLLが1.0 GHzで起動する場合
+
+2026-11-14、DTがcore 115.385 MHz / DMA 187.5 MHzを要求していても、実際は
+111.111 / 166.667 MHzとなる状態を確認した。IOPLLが約1.0 GHzでは整数分周で
+要求値を作れない。以前の約1.5 GHzなら、それぞれ1/13・1/8で生成できる。
+bitstreamのSHA256とタイミング検査は115.385 MHz版と一致していた。
+保存済みの旧kernel 6.8.0-1015-xilinxでもIOPLLは1.0 GHzだったため、
+kernelの版だけを戻す方法では復元しなかった。
+
+Linuxのクロックproviderへの周波数指定では変更が反映されなかった。
+U-BootでIOPLLを1.5 GHzにする試行では115.385 / 187.5 MHzで機能試験を通過したが、
+ソフトウェア再起動後にSSHへ復帰せず、電源再投入が必要になった。
+終了時にPLLを戻す試行でも解決しなかったため、この方法は採用せず、
+起動スクリプトとFITを作業前の内容に戻した。再起動失敗の原因は未確定。
+
+復元元は `/root/fades/abi6/clocks/boot.scr.uimg.before-iopll` と
+`/root/fades/abi6/clocks/image.fit.before-iopll`。
+復元後に対象ファイルとの `cmp` とSHA256の一致を確認済み。
+今回のドライバー変更にPLL操作や起動設定の変更は含めない。
 
 ## 制御レジスター
 
@@ -158,5 +178,5 @@ DMA MMIO・IRQ は FADES ドライバーが直接所有し、overlay に別 DMA 
 |0x018|投入登録累積件数の上位32bit|
 |0x100〜0x25f|44個の64-bit counter、下位32bitが先|
 
-counter順は `host/include/fades_ioctl.h` のコメントを参照。
+counter順は `host/driver/include/fades_ioctl.h` のコメントを参照。
 クロックの異なるcounterはhandshakeで保持・採取し、全件排出後に件数を照合する。

@@ -16,6 +16,9 @@ PS の Linux プログラムから DDR / AXI DMA 経由で問題を投入し、I
 ホストC++実装は削除した。要求仕様と、verify／streamが確認していたことは
 [host/README.md](host/README.md) にまとめている。
 Linuxドライバー・ioctl ABI・Pythonによる実機試験は `host/` にある。
+現行C I/Fは **ABI v6**。TX/RX面数を独立に指定し、1 MiB単位で個別mmapする。
+設定・mmap・投入回収の使用例は [host/README.md](host/README.md#現行c-ifabi-v6)、
+実行可能なCツールは `host/tools/fades_run.c`。
 
 ## 2. 実機を準備する
 
@@ -54,7 +57,7 @@ cmake --preset kv260-ps
 cmake --build --preset kv260-ps
 ```
 
-通常のbuildで `build/kv260-ps/host/driver/fades.ko` を生成する。
+通常のbuildで `build/kv260-ps/host/driver/src/fades.ko` とCツール `build/kv260-ps/host/tools/fades_run` を生成する。
 実機自身のコンパイラーと実行中カーネルのヘッダーを使う。
 firmwareを配置し、`xmutil loadapp fades` と `insmod fades.ko` を実行すると **`/dev/fades`** が使える。
 転送・Arm64 ビルド・ロードの手順と、各ボード用ファイルの役割は
@@ -102,7 +105,7 @@ XPM試験にはVivadoが必要。`kv260-ps` ではRTL検証ツール・Vivado・
 |------------|----------|--------------------------|--------|
 | `host` | 開発機 | CPU参照テスト、RTLシミュレーター・テストベンチ | `build/host/` |
 | `kv260-pl` | 開発機 | FPGA回路・検査レポート・firmwareパッケージ | `build/kv260-pl/` |
-| `kv260-ps` | KV260 | カーネルドライバー | `build/kv260-ps/` |
+| `kv260-ps` | KV260 | カーネルドライバー、C使用例 | `build/kv260-ps/` |
 
 各プリセットは `cmake --build --preset <名前>` で必要なものをまとめてビルドする。
 CPU参照・RTL試験は `ctest --preset host`、実機試験は `host/tests/` のPythonを使う。
@@ -139,7 +142,7 @@ ctest --test-dir build/host-1core --output-on-failure -L '^fades$'
 | 対象         | 読むファイル                                                        | 役割                                        |
 |--------------|---------------------------------------------------------------------|---------------------------------------------|
 | PS要求仕様   | `host/README.md`                                                  | 要求仕様と削除前の確認内容                  |
-| Linux接続    | `host/include/fades_ioctl.h` → `host/driver/fades.c`                | 公開ABI → バッファ・DMA・制御               |
+| Linux接続    | `host/driver/include/fades_ioctl.h` → `host/driver/src/fades.c`                | 公開ABI → バッファ・DMA・制御               |
 | ボード生成   | `fpga/kv260/scripts/build.tcl`                                      | PS・DMA・クロックの接続、実装、出力検査     |
 | PLの入口     | `rtl/fades_axi.sv` → `fades.sv`                                     | 制御 → 供給・ID管理・結果回収・コア群       |
 | 探索         | `rtl/fades_core.sv` → `deduction_engine.sv` / `branch_generator.sv` | 状態列・探索 → 推論 / 分岐                  |
@@ -149,6 +152,9 @@ ctest --test-dir build/host-1core --output-on-failure -L '^fades$'
 `build/` は生成物、`results/` は生ログ・実験履歴、`docs/` はローカル設計メモ。
 
 ## 実測
+
+現行ABI v6の可変バッファ・個別mmap・リング2/32枠の実機検証は
+[host/ABI6_RESULTS.md](host/ABI6_RESULTS.md) を参照。
 
 以下は削除前のホストC++実装による測定記録。
 

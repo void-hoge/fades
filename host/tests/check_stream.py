@@ -1,211 +1,233 @@
 #!/usr/bin/env python3
-"""Real-board fixed-slot tests: merging, idle tails, SG wrap, stalls, restart."""
+"""Real-board streaming, no-dequeue accumulation, backpressure and restart."""
+import argparse
 import errno
 import fcntl
-import mmap
-import os
 import select
 import struct
-import sys
 import time
 
-BUF = struct.Struct("=IIII")
-INFO = struct.Struct("=IIIIQ")
-BASE = ord("F") << 8
-INFO_CMD = (2 << 30) | (INFO.size << 16) | BASE
-QBUF = (1 << 30) | (BUF.size << 16) | BASE | 3
-DQBUF = (3 << 30) | (BUF.size << 16) | BASE | 4
-STATS = (2 << 30) | (352 << 16) | BASE | 2
-ON = BASE | 5
-END, OFF = BASE | 6, BASE | 7
+from fades_device import Device, END, RECORDS, STRIDE, expect_errno
+
 DIGITS = "534678912672195348198342567859761423426853791713924856961537284287419635345286179"
 CELLS = sum(int(d) << (4 * i) for i, d in enumerate(DIGITS))
+SOLVED = struct.pack("<QB", 0, 0) + CELLS.to_bytes(41, "little") + bytes(14)
 
 
-def expect_errno(code, action):
+def fill(buffer, first, n):
+    data = bytearray(n * 64)
+    for j in range(n):
+        rid = first + j
+        cells = 15 if rid % 13 == 1 else 0x11 if rid % 13 == 2 else CELLS
+        struct.pack_into("<Q", data, j * 64, rid)
+        data[j * 64 + 8] = rid & 255  # Input status is ignored.
+        data[j * 64 + 9:j * 64 + 50] = cells.to_bytes(41, "little")
+    buffer[:len(data)] = data
+
+
+def verify(buffer, n, seen):
+    data = buffer[:n * 64]
+    for j in range(n):
+        r = data[j * 64:(j + 1) * 64]
+        rid = int.from_bytes(r[:8], "little")
+        assert rid < len(seen) and not seen[rid], ("duplicate/stale ID", rid)
+        seen[rid] = 1
+        status = 2 if rid % 13 == 1 else 1 if rid % 13 == 2 else 0
+        assert r[8] == status, (rid, r[8], status)
+        assert int.from_bytes(r[9:50], "little") == (0 if status else CELLS)
+        assert r[50:] == bytes(14)
+
+
+def totals(d, total):
+    s = d.stats()
+    assert all(s[i] == total for i in (0, 1, 3, 4)), s[:6]
+    assert sum(s[6:12]) == sum(s[12:18]) == total
+    assert all(v <= 2 for v in s[38:44]), s[38:44]
+
+
+def accumulate(path, ntx, nrx):
+    """All input prequeued; do not dequeue ANY RX until HW has finished.
+
+    One full-capacity output per TX, plus a short tail, makes 65/65 exercise
+    pending DMA work beyond both hardware ring lengths.
+    """
+    d = Device(path, ntx, nrx)
     try:
-        action()
-    except OSError as exc:
-        assert exc.errno == code, (code, exc.errno)
-    else:
-        raise AssertionError(f"Expected errno {code}")
+        used = min(ntx, nrx)
+        lengths = [RECORDS] * (used - 1) + [19]
+        total = sum(lengths)
+        first = 0
+        for i, n in enumerate(lengths):
+            fill(d.maps[0][i], first, n)
+            first += n
+            d.queue(0, i, n)
+        for i in range(nrx):
+            d.maps[1][i][:] = b"\xa5" * STRIDE
+            d.queue(1, i)
+        d.start()
+        fcntl.ioctl(d.fd, END)
+        deadline = time.monotonic() + 10
+        while d.stats()[1] != total:
+            assert time.monotonic() < deadline, "No-dequeue accumulation stalled"
+            time.sleep(0.001)
+        totals(d, total)
+        seen = bytearray(total)
+        received = 0
+        outputs = []
+        while received < total:
+            d.wait(select.POLLIN)
+            while (done := d.dequeue(1)) is not None:
+                i, n = done
+                verify(d.maps[1][i], n, seen)
+                received += n
+                outputs.append(n)
+        assert received == total and all(seen)
+        assert outputs == lengths, outputs
+        assert sum(1 for _ in iter(lambda: d.dequeue(0), None)) == used
+        print(f"PASS: TX/RX={ntx}/{nrx}, {total} IDs accumulated without any RX dequeue/read")
+    finally:
+        d.close()
 
 
-def main():
-    fd = os.open(sys.argv[1] if len(sys.argv) > 1 else "/dev/fades", os.O_RDWR)
-    tx = rx = None
+def stream(path, ntx, nrx):
+    d = Device(path, ntx, nrx)
     try:
-        info = bytearray(INFO.size)
-        fcntl.ioctl(fd, INFO_CMD, info, True)
-        version, slots, stride, _, size = INFO.unpack(info)
-        assert version == 3
-        tx = mmap.mmap(fd, size, flags=mmap.MAP_SHARED)
-        rx = mmap.mmap(fd, size, flags=mmap.MAP_SHARED, offset=size)
+        d.start()
+        expect_errno(errno.EBUSY, d.start)
+        fcntl.ioctl(d.fd, END)
+        expect_errno(errno.EPIPE, lambda: d.queue(0, 0, 1))
+        d.stop()
+        # TX must wait for receive capacity. Stop cancels queued work.
+        d.queue(0, 0, 1)
+        d.start()
+        d.poll.modify(d.fd, select.POLLOUT)
+        assert not d.poll.poll(20), "TX ran without RX"
+        d.stop()
 
-        def queue(q, index, records=0):
-            if q == 1:
-                # Dirty every cached RX line while CPU-owned. Reuse must clean
-                # before DMA and invalidate before returning fresh results.
-                rx[index * stride:(index + 1) * stride] = b"\xa5" * stride
-            fcntl.ioctl(fd, QBUF, BUF.pack(q, index, records, 0))
-
-        def start():
-            fcntl.ioctl(fd, ON)
-
-        def dequeue(q):
-            b = bytearray(BUF.pack(q, 0, 0, 0))
-            try:
-                fcntl.ioctl(fd, DQBUF, b, True)
-                return BUF.unpack(b)[1:3]
-            except OSError as exc:
-                if exc.errno == errno.EAGAIN:
-                    return None
-                raise
-
-        # No input, clean finish, then restart without module/FPGA reload.
-        start()
-        expect_errno(errno.EBUSY, start)
-        fcntl.ioctl(fd, END)
-        expect_errno(errno.EPIPE, lambda: queue(0, 0, 1))
-        fcntl.ioctl(fd, OFF)
-
-        # Queued input must wait for RX capacity. STREAMOFF cancels it.
-        queue(0, 0, 1)
-        start()
-        poll = select.poll()
-        poll.register(fd, select.POLLOUT)
-        assert not poll.poll(20), "TX ran without an RX reservation"
-        fcntl.ioctl(fd, OFF)
-
-        # Register both inputs before START: output must merge to 16384+1616.
-        # No END_INPUT is needed to return the short slot. Then resume with 3
-        # records in the same session and observe another idle tail.
-        data = (struct.pack("<QB", 0, 0) + CELLS.to_bytes(41, "little") + bytes(14))
-        for i in range(2):
-            tx[i * stride:i * stride + 9000 * 64] = data * 9000
-            queue(0, i, 9000)
-        for i in range(slots):
-            queue(1, i)
-        start()
-        poll.modify(fd, select.POLLIN)
+        # Merge two inputs into a full output + tail, without END_INPUT.
+        # Works even with a single TX/RX buffer by reusing completions.
+        d.maps[0][0][:9000 * 64] = SOLVED * 9000
+        d.queue(0, 0, 9000)
+        if ntx > 1:
+            d.maps[0][1][:9000 * 64] = SOLVED * 9000
+            d.queue(0, 1, 9000)
+        for i in range(nrx):
+            d.queue(1, i)
+        d.start()
+        if ntx == 1:
+            while d.dequeue(0) is None:
+                d.wait(select.POLLOUT)
+            # The first idle tail may already have been emitted.
+            d.queue(0, 0, 9000)
         sizes = []
         while sum(sizes) < 18000:
-            assert poll.poll(1000), "Merged-slot timeout"
-            while (done := dequeue(1)) is not None:
-                index, n = done
+            d.wait(select.POLLIN)
+            while (done := d.dequeue(1)) is not None:
+                i, n = done
                 sizes.append(n)
-                queue(1, index)
-        assert sizes == [16384, 1616], sizes
-        expect_errno(errno.EINVAL, lambda: queue(0, 2, 16385))
-        while dequeue(0) is not None:
+                assert d.maps[1][i][:n * 64] == SOLVED * n
+                d.queue(1, i)
+        if ntx > 1:
+            assert sizes == [16384, 1616], sizes
+        while d.dequeue(0) is not None:
             pass
-        time.sleep(0.01)
-        tx[:3 * 64] = data * 3
-        queue(0, 0, 3)
-        assert poll.poll(1000), "Idle resume timeout"
-        index, n = dequeue(1)
+        d.maps[0][0][:3 * 64] = SOLVED * 3
+        d.queue(0, 0, 3)
+        d.wait(select.POLLIN)
+        _, n = d.dequeue(1)
         assert n == 3
-        fcntl.ioctl(fd, OFF)
+        d.stop()
 
-        lengths = [1, 7, 10000, 16384, 31, 3] * 16 + [19]
+        # Enough work to fill every RX and wrap both queues/rings repeatedly.
+        lengths = [1, 7, 10000, RECORDS, 31, 3] * max(16, nrx * 2) + [19]
         total = sum(lengths)
         seen = bytearray(total)
         submitted = received = next_packet = 0
         sealed = False
         held = []
-        delay_done = False
-        packet_lengths = []
+        released = False
 
-        def submit(index):
+        def submit(i):
             nonlocal submitted, next_packet, sealed
             if next_packet == len(lengths):
                 if not sealed:
-                    fcntl.ioctl(fd, END)
+                    fcntl.ioctl(d.fd, END)
                     sealed = True
                 return
             n = lengths[next_packet]
-            data = bytearray(n * 64)
-            for j in range(n):
-                rid = submitted + j
-                cells = CELLS
-                if rid % 13 == 1:  # invalid cell -> status 2
-                    cells = 15
-                elif rid % 13 == 2:  # duplicate givens -> status 1
-                    cells = 0x11
-                struct.pack_into("<Q", data, j * 64, rid)
-                # Deliberately nonzero input status: HW must ignore it.
-                data[j * 64 + 8] = rid & 255
-                data[j * 64 + 9:j * 64 + 50] = cells.to_bytes(41, "little")
-            tx[index * stride:index * stride + len(data)] = data
-            queue(0, index, n)
-            expect_errno(errno.EBUSY, lambda: queue(0, index, n))
+            fill(d.maps[0][i], submitted, n)
+            d.queue(0, i, n)
+            expect_errno(errno.EBUSY, lambda: d.queue(0, i, n))
             submitted += n
             next_packet += 1
 
-        for i in range(slots):
-            queue(1, i)
+        for i in range(nrx):
+            d.maps[1][i][:] = b"\xa5" * STRIDE
+            d.queue(1, i)
+        for i in range(ntx):
             submit(i)
-        start()
-        while not sealed or received != submitted:
-            poll.modify(fd, select.POLLIN | (0 if sealed else select.POLLOUT))
-            events = poll.poll(10000)
-            assert events, "stream progress timeout"
-            assert not events[0][1] & (select.POLLERR | select.POLLHUP | select.POLLNVAL)
-            while (done := dequeue(1)) is not None:
-                index, n = done
-                packet_lengths.append(n)
-                data = rx[index * stride:index * stride + n * 64]
-                for j in range(n):
-                    r = data[j * 64:(j + 1) * 64]
-                    rid = int.from_bytes(r[:8], "little")
-                    assert rid < submitted and not seen[rid], ("ID", rid)
-                    seen[rid] = 1
-                    status = 2 if rid % 13 == 1 else 1 if rid % 13 == 2 else 0
-                    assert r[8] == status
-                    assert int.from_bytes(r[9:50], "little") == (0 if status else CELLS)
-                    assert r[50:] == bytes(14)
+        d.start()
+        while received != total:
+            d.wait(select.POLLIN | (0 if sealed else select.POLLOUT))
+            while (done := d.dequeue(1)) is not None:
+                i, n = done
+                assert 0 < n <= RECORDS
+                verify(d.maps[1][i], n, seen)
                 received += n
-                if not delay_done:
-                    held.append(index)
-                    if len(held) == slots:
-                        # Exhaust RX while more TX is queued, then resume.
+                if not released:
+                    # Hold every RX; ensure completed data remains unchanged
+                    # while TX eventually stalls, then return capacity.
+                    held.append((i, n, bytes(d.maps[1][i][:n * 64])))
+                    if len(held) == nrx:
                         time.sleep(0.02)
-                        for s in held:
-                            queue(1, s)
+                        before = d.stats()[0]
+                        time.sleep(0.02)
+                        assert d.stats()[0] == before, "RX starvation did not stall TX"
+                        for index, count, snapshot in held:
+                            assert d.maps[1][index][:count * 64] == snapshot
+                            d.maps[1][index][:] = b"\xa5" * STRIDE
+                            d.queue(1, index)
                         held.clear()
-                        delay_done = True
+                        released = True
                 else:
-                    queue(1, index)
+                    d.maps[1][i][:] = b"\xa5" * STRIDE
+                    d.queue(1, i)
             if not sealed:
-                while (done := dequeue(0)) is not None:
+                while (done := d.dequeue(0)) is not None:
                     submit(done[0])
                     if sealed:
                         break
-        assert received == total and all(seen)
-        assert sum(packet_lengths) == total and all(0 < n <= 16384 for n in packet_lengths)
-        stats = bytearray(352)
-        fcntl.ioctl(fd, STATS, stats, True)
-        counts = struct.unpack("=44Q", stats)
-        assert all(counts[i] == total for i in (0, 1, 3, 4)), counts[:6]
-        assert sum(counts[6:12]) == total and sum(counts[12:18]) == total
-        fcntl.ioctl(fd, OFF)
-
-        # Reset with active work and unread results, then run an empty session.
-        queue(1, 0)
-        queue(0, 0, 10000)
-        start()
-        fcntl.ioctl(fd, OFF)
-        start()
-        fcntl.ioctl(fd, END)
-        fcntl.ioctl(fd, OFF)
-        print(f"PASS: 9000+9000 -> 16384+1616 and idle resume; {total} IDs, {len(packet_lengths)} output slots, dirty cached RX reuse, SG wrap, RX starvation, cancel/restart")
+        assert released and all(seen)
+        totals(d, total)
+        d.stop()
+        # Reset active work/unread output; prove no stale results on restart.
+        d.queue(1, 0)
+        fill(d.maps[0][0], 0, 10000)
+        d.queue(0, 0, 10000)
+        d.start()
+        d.stop()
+        d.queue(1, 0)
+        fill(d.maps[0][0], 0, 1)
+        d.queue(0, 0, 1)
+        d.start()
+        d.wait(select.POLLIN)
+        i, n = d.dequeue(1)
+        assert n == 1
+        verify(d.maps[1][i], n, bytearray(1))
+        totals(d, 1)
+        print(f"PASS: TX/RX={ntx}/{nrx}, {total} mixed IDs, idle tails/resume, SG wrap, held RX stability, backpressure, dirty reuse, restart")
     finally:
-        fcntl.ioctl(fd, OFF)
-        if rx is not None:
-            rx.close()
-        if tx is not None:
-            tx.close()
-        os.close(fd)
+        d.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("device", nargs="?", default="/dev/fades")
+    parser.add_argument("--tx", type=int, default=8)
+    parser.add_argument("--rx", type=int, default=8)
+    args = parser.parse_args()
+    accumulate(args.device, args.tx, args.rx)
+    stream(args.device, args.tx, args.rx)
 
 
 if __name__ == "__main__":

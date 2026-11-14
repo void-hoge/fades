@@ -5,30 +5,43 @@
 #include <linux/ioctl.h>
 #include <linux/types.h>
 
-#define FADES_DMA_ABI_VERSION 3
-#define FADES_DMA_SLOTS 8
+#define FADES_DMA_ABI_VERSION 6
+#define FADES_DMA_MAX_BUFFERS 4096U
 #define FADES_DMA_SLOT_BYTES (1024U * 1024U)
 #define FADES_RECORDS_PER_SLOT (FADES_DMA_SLOT_BYTES / 64U)
 
 struct fades_dma_info {
     __u32 abi_version;
-    __u32 slots;
     __u32 slot_bytes;
+    __u32 max_buffers; /* Per queue; allocations may fail below this limit. */
+    __u32 tx_buffers;  /* Zero until CONFIG succeeds. */
+    __u32 rx_buffers;
     __u32 reserved;
-    /* Each mmap covers this many bytes. TX offset=0, RX offset=map_bytes. */
+};
+
+/* One successful configuration per open. Failure rolls back for retry. */
+struct fades_dma_config {
+    __u32 tx_buffers;
+    __u32 rx_buffers;
+    __u32 reserved[2];
+};
+
+/* queue/index are inputs; offsets are opaque, not physical/DMA addresses.
+ * mmap exactly map_bytes at mmap_offset using MAP_SHARED. */
+struct fades_buffer_info {
+    __u32 queue;
+    __u32 index;
+    __aligned_u64 mmap_offset;
     __aligned_u64 map_bytes;
 };
 
-enum fades_queue {
-    FADES_QUEUE_TX = 0,
-    FADES_QUEUE_RX = 1
-};
+enum fades_queue { FADES_QUEUE_TX = 0, FADES_QUEUE_RX = 1 };
 
 struct fades_buffer {
     __u32 queue;
     __u32 index;
-    __u32 records;     /* QBUF: TX count or RX zero. DQBUF: actual count. */
-    __u32 reserved;    /* Must be zero. */
+    __u32 records;  /* QBUF: TX count or RX zero. DQBUF: actual count. */
+    __u32 reserved; /* Must be zero. */
 };
 
 /* Session-cumulative snapshot. Core and DMA domains are sampled at different
@@ -49,5 +62,7 @@ struct fades_solver_stats {
 #define FADES_STREAMON _IO('F', 5)
 #define FADES_END_INPUT _IO('F', 6)
 #define FADES_STREAMOFF _IO('F', 7)
+#define FADES_DMA_CONFIG _IOW('F', 8, struct fades_dma_config)
+#define FADES_QUERYBUF _IOWR('F', 9, struct fades_buffer_info)
 
 #endif
