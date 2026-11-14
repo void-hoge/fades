@@ -1,6 +1,6 @@
 # KV260 solver synchronizer first stages. Do not false-path the clock groups:
 # the held snapshot bundle has an explicit physical datapath bound below.
-set first_stages [get_pins -hier -regexp {.*(req_sync_reg\[0\]|ack_sync_reg\[0\]|enable_sync_reg\[0\]|total_meta_reg\[[0-9]+\])/D}]
+set first_stages [get_pins -hier -regexp {.*(req_sync_reg\[0\]|ack_sync_reg\[0\]|enable_sync_reg\[0\])/D}]
 set_false_path -to $first_stages
 set reset_pins [get_pins -hier -regexp {.*reset_sync_reg\[[0-9]+\]/(CLR|PRE)}]
 set_false_path -to $reset_pins

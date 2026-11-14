@@ -2,7 +2,7 @@ ifneq ($(KERNELRELEASE),)
 obj-m := fades.o
 else
 KDIR ?= /lib/modules/$(shell uname -r)/build
-OUT ?= ../../build/host/driver
+OUT ?= ../../../build/host/driver/src
 .PHONY: all clean
 all:
 	mkdir -p "$(OUT)"

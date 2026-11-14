@@ -26,7 +26,7 @@ proc export_firmware {root out} {
     report_io -file $out/io.rpt
     report_drc -file $out/drc.rpt
     report_route_status -file $out/route_status.rpt
-    foreach pattern {{.*(req_sync_reg\[0\]|ack_sync_reg\[0\]|enable_sync_reg\[0\]|total_meta_reg\[[0-9]+\])/D} {.*reset_sync_reg\[[0-9]+\]/(CLR|PRE)}} {
+    foreach pattern {{.*(req_sync_reg\[0\]|ack_sync_reg\[0\]|enable_sync_reg\[0\])/D} {.*reset_sync_reg\[[0-9]+\]/(CLR|PRE)}} {
         if {![llength [get_pins -hier -regexp $pattern]]} { error "Solver CDC synchronizers missing: $pattern" }
     }
 
@@ -39,10 +39,6 @@ proc export_firmware {root out} {
         -desc {Board reset OR software reset drives async assertion only; local three-stage release is synchronized. Board reset changes only during global initialization.}
     create_waiver -type CDC -id CDC-11 -to $reset_first -user fades \
         -desc {Asynchronous reset intentionally fans out to independent local reset-release synchronizers. FIFO reset-busy and local reset gates tolerate differing release cycles; reset is held throughout reinitialization.}
-    # Total count is immutable through reset release and the complete run.
-    create_waiver -type CDC -id CDC-6 \
-        -to [get_pins -hier -regexp {.*total_meta_reg\[[0-9]+\]/D}] -user fades \
-        -desc {Configuration is held stable through reset release and the complete run; both bus stages settle before any problem is dispatched.}
     # Snapshot stays held until the next request; receiver waits for synchronized ack.
     create_waiver -type CDC -id CDC-15 \
         -from [get_pins -hier -regexp {.*core_snapshot_reg\[[0-9]+\]/C}] \

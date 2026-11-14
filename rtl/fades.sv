@@ -1,6 +1,6 @@
 `timescale 1ns/1ps
-// Little-endian 64-byte records. Input: ID[63:0], cells[387:64].
-// Output: ID[63:0], status[71:64] (0 solved / 1 unsat / 2 invalid), cells[395:72].
+// Little-endian 64-byte records: ID[63:0], status[71:64], cells[395:72].
+// Input status is ignored. Output status: 0 solved / 1 unsat / 2 invalid.
 module fades #(
     parameter integer CORES = 6,
     parameter integer INFLIGHT_LIMIT = 2,
@@ -11,8 +11,10 @@ module fades #(
     input wire reset,
     /* verilator lint_on SYNCASYNCNET */
     input wire enable,
-    // Held constant throughout a run, programmed while reset is asserted.
-    input wire [31:0] total_records, packet_records,
+    // DMA-domain configuration and credit total. Register ALL queued input
+    // before sending it, including work still waiting in the host/DMA.
+    input wire [31:0] slot_records,
+    input wire [63:0] submitted_records,
     input wire [127:0] s_axis_tdata,
     input wire [15:0] s_axis_tkeep,
     input wire s_axis_tvalid, s_axis_tlast,
@@ -47,17 +49,14 @@ module fades #(
     end
     wire dma_reset = dma_reset_sync[2];
     wire core_reset = core_reset_sync[2];
-    // Configuration is held throughout reset and the complete run. Synchronize
-    // it before use in the core domain; reset release provides the settling time.
-    (* ASYNC_REG = "TRUE" *) logic [31:0] total_meta, total_core;
-    always @(posedge core_clk) begin total_meta <= total_records; total_core <= total_meta; end
     logic [383:0] assembly;
     logic [1:0] input_beat;
     wire [387:0] queue_data;
     wire queue_valid, queue_ready, queue_write_ready;
     wire [$clog2(FIFO_DEPTH):0] queue_write_count;
-    // Only the low four bits of beat 3 contain cells; drop reserved bits.
-    wire [387:0] assembled = {s_axis_tdata[3:0], assembly};
+    // Strip input status and reserved bits for the internal ID + cells format.
+    wire [387:0] assembled = {s_axis_tdata[11:0], assembly[383:72], assembly[63:0]};
+    wire unused_input_status = ^assembly[71:64];
     wire bad_beat = s_axis_tkeep != 16'hffff ||
         (s_axis_tlast && input_beat != 3);
     assign s_axis_tready = !dma_reset && !framing_error &&
@@ -194,18 +193,17 @@ module fades #(
             end
         end
     end
-    logic work_started, work_done;
+    logic work_started;
     always @(posedge core_clk) begin
         if (core_reset) begin
             rr_head <= 0; result_head <= 0;
             result_buffer <= 0; result_buffer_valid <= 0;
             dispatch_count <= 0; collected_count <= 0; queue_empty_cycles <= 0;
-            processing_cycles <= 0; work_started <= 0; work_done <= 0;
+            processing_cycles <= 0; work_started <= 0;
         end else begin
-            if (!work_done && (work_started || dispatch)) begin
+            if (work_started || dispatch) begin
                 work_started <= 1;
                 processing_cycles <= processing_cycles+1'b1;
-                if (collect && collected_count+1'b1 == {32'b0,total_core}) work_done <= 1;
             end
             if (!queue_valid) queue_empty_cycles <= queue_empty_cycles + 1'b1;
             if (dispatch) begin
@@ -236,16 +234,20 @@ module fades #(
     );
     logic [1:0] output_beat;
     logic [31:0] packet_position;
+    logic record_last;
     assign m_axis_tdata = output_record[128*output_beat +: 128];
     assign m_axis_tkeep = 16'hffff;
-    assign m_axis_tvalid = !dma_reset && output_record_valid && output_count < {32'b0,total_records};
-    assign m_axis_tlast = output_beat == 3 &&
-        (packet_position+1'b1 == packet_records || output_count+1'b1 == {32'b0,total_records});
+    assign m_axis_tvalid = !dma_reset && output_record_valid && output_count < submitted_records;
+    // Freeze the boundary at the first beat. Later input registrations must
+    // never change TLAST while the last beat is held under backpressure.
+    assign m_axis_tlast = output_beat == 3 && record_last;
     assign output_record_ready = m_axis_tvalid && m_axis_tready && output_beat == 3;
     always @(posedge dma_clk) begin
         if (dma_reset) begin
-            output_beat <= 0; packet_position <= 0; output_count <= 0;
+            output_beat <= 0; packet_position <= 0; output_count <= 0; record_last <= 0;
         end else if (m_axis_tvalid && m_axis_tready) begin
+            if (output_beat == 0)
+                record_last <= packet_position+1'b1 == slot_records || output_count+1'b1 == submitted_records;
             output_beat <= output_beat+1'b1;
             if (output_beat == 3) begin
                 output_count <= output_count+1'b1;

@@ -52,17 +52,25 @@ module tb_fades_axi;
     initial begin
         repeat(20)@(negedge dma_clk);aresetn=1;
         read_reg(0,value);if(value!==1)$fatal(1,"Reset default");
-        read_reg(20,value);if(value!==32'h46414401)$fatal(1,"Version");
-        write_reg(4,32'h11223344,15,0);
-        write_reg(4,32'haabbccdd,5,1);
-        read_reg(4,value);if(value!==32'h11bb33dd)$fatal(1,"Byte strobes");
-        write_reg(8,17,15,1);write_reg(0,2,1,0);
+        read_reg(20,value);if(value!==32'h46414404)$fatal(1,"Version");
+        write_reg(0,2,2,1);
+        read_reg(0,value);if(value!==1)$fatal(1,"Control byte strobe");
+        write_reg(4,10000,15,0);
+        write_reg(0,2,1,0);
+        repeat(20)@(negedge dma_clk);
+        write_reg(8,17,15,1);
+        read_reg(8,value);if(value!==17)$fatal(1,"Input credits");
+        write_reg(8,32'hffffffff,15,0);
+        read_reg(8,value);if(value!==16)$fatal(1,"Credit low carry");
+        read_reg(24,value);if(value!==1)$fatal(1,"Credit high carry");
+        write_reg(8,100,1,0);
+        read_reg(8,value);if(value!==16)$fatal(1,"Partial credit write accepted");
         write_reg(4,1,15,0);
-        read_reg(4,value);if(value!==32'h11bb33dd)$fatal(1,"Live config changed");
+        read_reg(4,value);if(value!==10000)$fatal(1,"Live capacity changed");
         repeat(100)@(negedge dma_clk);
         write_reg(16,1,1,1);
         repeat(20)@(negedge dma_clk);
-        read_reg(12,value);if(value!==0)$fatal(1,"Snapshot did not complete");
+        read_reg(12,value);if(value[1:0]!==0)$fatal(1,"Snapshot did not complete");
         read_reg(12'h128,value);if(value==0)$fatal(1,"Core snapshot did not cross");
         read_reg(12'h100,value);if(value!==0)$fatal(1,"Spurious input count");
         // Idle enabled cores accumulate input wait; unimplemented ABI slots stay zero.
@@ -76,7 +84,8 @@ module tb_fades_axi;
             end
         write_reg(0,1,1,1);
         read_reg(0,value);if(value!==1)$fatal(1,"Soft reset");
-        $display("PASS AXI-Lite independent AW/W, strobes, response stalls, config lock, snapshot");
+        read_reg(8,value);if(value!==0)$fatal(1,"Credit reset");
+        $display("PASS AXI-Lite independent AW/W, strobes, response stalls, 64-bit credits, snapshot");
         $finish;
     end
     initial begin #100000;$fatal(1,"Timeout");end
