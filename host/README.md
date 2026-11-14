@@ -45,7 +45,7 @@
 - HW versionは `0x46414404`。旧HWとは入力セルの位置が異なる。
 - ドライバーとABIは `driver/src/fades.c` / `driver/include/fades_ioctl.h` に残している。
 
-## 現行C I/F：ABI v7
+## 現行C I/F：ABI v8
 
 `driver/include/fades_ioctl.h` をincludeし、`/dev/fades` のioctl / mmap / pollを使う。
 上記のRAIIや `try_dequeue()` は高水準ライブラリーの要求であり、現在のC ABIでは
@@ -55,10 +55,10 @@
 
 ```c
 struct fades_dma_config cfg = {.tx_buffers = 8, .rx_buffers = 64};
-ioctl(fd, FADES_DMA_CONFIG, &cfg);
+ioctl(fd, FADESIOC_DMA_CONFIG, &cfg);
 
 struct fades_buffer_info b = {.queue = FADES_QUEUE_TX, .index = 3};
-ioctl(fd, FADES_QUERYBUF, &b);
+ioctl(fd, FADESIOC_QUERYBUF, &b);
 void *tx3 = mmap(NULL, b.map_bytes, PROT_READ | PROT_WRITE,
                  MAP_SHARED, fd, (off_t)b.mmap_offset);
 ```
@@ -100,7 +100,7 @@ open → CONFIG → 各面のQUERYBUF / mmap
   両方は `POLLOUT | POLLIN`。pollは完了を消費せず、回収するまで即座に戻る。
 - 入力終了通知は不要。RXは満杯または登録済み全問題の完了で端数を含めて返る。
   最終投入後はRXのみを待ち、回収件数が投入件数に達したら終了する。idle後の再投入も可能。
-- v7では `END_INPUT` を削除した。旧ioctl番号6は欠番で、呼び出すと `ENOTTY`。
+- v7で `END_INPUT` を削除し、v8では番号6を `STREAMOFF` に割り当てた。
 - `STREAMOFF` は転送をリセットし、全面をCPU所有に戻す。設定とマッピングは維持する。
 - `STREAMOFF` が成功すると、初回 `STREAMON` 前の呼び出しを含め、待機方向にかかわらず
   `poll` は `POLLHUP` を返す。停止後にpollした場合も、次の `STREAMON` 成功まで通知が続く。
@@ -145,5 +145,5 @@ python3 host/tests/check_example.py build/kv260-ps/host/tools/fades_run \
 ```
 
 連続投入の計測はセットアップ・ファイル読み込み・初回の入力コピーと投入・出力内容の検証を含まない。
-アプリも新ヘッダーでビルドする。v6からは `END_INPUT` の削除とABI番号のみが変更され、
-構造体・他のioctl番号・mmap方法は同じ。
+アプリも新ヘッダーでビルドする。v7からは `STREAMOFF` のioctl番号とABI番号が変更され、
+ioctlマクロは `FADESIOC_*` に改名された。構造体・他のioctl番号・mmap方法は同じ。

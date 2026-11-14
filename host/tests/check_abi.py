@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real-board ABI v7 validation, per-buffer mappings and file/VMA lifetime."""
+"""Real-board ABI v8 validation, per-buffer mappings and file/VMA lifetime."""
 import errno
 import fcntl
 import mmap
@@ -16,12 +16,12 @@ def main():
     fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
     maps = []
     try:
-        assert info(fd) == (7, STRIDE, 4096, 0, 0, 0)
+        assert info(fd) == (8, STRIDE, 4096, 0, 0, 0)
         expect_errno(errno.EBUSY, lambda: os.open(path, os.O_RDWR))
         expect_errno(errno.ENOTTY, lambda: fcntl.ioctl(fd, BASE | 2))
         for cmd in (INFO_CMD, CONFIG_CMD, QUERY_CMD, QBUF, DQBUF):
             expect_errno(errno.EFAULT, lambda cmd=cmd: fcntl.ioctl(fd, cmd, 0))
-        expect_errno(errno.ENOTTY, lambda: fcntl.ioctl(fd, BASE | 6))
+        expect_errno(errno.ENOTTY, lambda: fcntl.ioctl(fd, BASE | 7))
         expect_errno(errno.EINVAL, lambda: fcntl.ioctl(fd, ON))
         expect_errno(errno.EINVAL, lambda: query(fd, 0, 0))
         expect_errno(errno.EINVAL, lambda: mmap.mmap(fd, STRIDE, flags=mmap.MAP_SHARED))
@@ -40,7 +40,7 @@ def main():
                          fcntl.ioctl(fd, CONFIG_CMD, CONFIG.pack(4096, 4096, 0, 0)))
             assert info(fd)[3:5] == (0, 0)
         fcntl.ioctl(fd, CONFIG_CMD, CONFIG.pack(3, 65, 0, 0))
-        assert info(fd) == (7, STRIDE, 4096, 3, 65, 0)
+        assert info(fd) == (8, STRIDE, 4096, 3, 65, 0)
         expect_errno(errno.EBUSY, lambda:
                      fcntl.ioctl(fd, CONFIG_CMD, CONFIG.pack(1, 1, 0, 0)))
         offsets = set()
@@ -93,7 +93,7 @@ def main():
                 os._exit(1)
             os._exit(0)
         assert os.waitpid(pid, 0)[1] == 0
-        print("PASS: ABI v7, removed ioctl rejected, asymmetric bounds, all individual mappings, ownership, close/fork lifetime")
+        print("PASS: ABI v8, old STREAMOFF rejected, asymmetric bounds, all individual mappings, ownership, close/fork lifetime")
     finally:
         for m in maps:
             m.close()

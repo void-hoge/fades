@@ -477,7 +477,7 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
         goto out;
     }
     switch (cmd) {
-    case FADES_DMA_INFO: {
+    case FADESIOC_DMA_INFO: {
         struct fades_dma_info info = {
             .abi_version = FADES_DMA_ABI_VERSION,
             .slot_bytes = FADES_DMA_SLOT_BYTES,
@@ -488,7 +488,7 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
         ret = copy_to_user(user, &info, sizeof(info)) ? -EFAULT : 0;
         break;
     }
-    case FADES_DMA_CONFIG: {
+    case FADESIOC_DMA_CONFIG: {
         struct fades_dma_config cfg;
         if (copy_from_user(&cfg, user, sizeof(cfg))) {
             ret = -EFAULT;
@@ -497,7 +497,7 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
         ret = configure_buffers(d, &cfg);
         break;
     }
-    case FADES_QUERYBUF: {
+    case FADESIOC_QUERYBUF: {
         struct fades_buffer_info info;
         if (copy_from_user(&info, user, sizeof(info))) {
             ret = -EFAULT;
@@ -513,21 +513,21 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
         ret = copy_to_user(user, &info, sizeof(info)) ? -EFAULT : 0;
         break;
     }
-    case FADES_STREAMON:
+    case FADESIOC_STREAMON:
         ret = fades_start(d);
         if (!ret) {
             d->stopped = false;
             fades_schedule(d);
         }
         break;
-    case FADES_STREAMOFF:
+    case FADESIOC_STREAMOFF:
         ret = fades_stop(d);
         if (!ret) {
             d->stopped = true;
         }
         break;
-    case FADES_QBUF:
-    case FADES_DQBUF: {
+    case FADESIOC_QBUF:
+    case FADESIOC_DQBUF: {
         struct fades_buffer b;
         if (copy_from_user(&b, user, sizeof(b))) {
             ret = -EFAULT;
@@ -546,7 +546,7 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
             ret = -EINVAL;
             break;
         }
-        if (cmd == FADES_QBUF) {
+        if (cmd == FADESIOC_QBUF) {
             if (b.index >= c->count ||
                 (b.queue == FADES_QUEUE_TX ? !b.records || b.records > FADES_RECORDS_PER_SLOT
                                            : b.records != 0)) {
@@ -583,7 +583,7 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
         }
         break;
     }
-    case FADES_SOLVER_STATS: {
+    case FADESIOC_SOLVER_STATS: {
         struct fades_solver_stats stats;
         u32 status;
         writel(1, d->control + 16);
@@ -797,7 +797,8 @@ static int fades_probe(struct platform_device *pdev) {
         goto fail;
     }
     platform_set_drvdata(pdev, d);
-    dev_info(d->dev, "ABI v7: variable 1 MiB buffers, %u SG entries per channel\n", RING_SIZE);
+    dev_info(d->dev, "ABI v%u: variable 1 MiB buffers, %u SG entries per channel\n",
+             FADES_DMA_ABI_VERSION, RING_SIZE);
     dev_info(d->dev, "actual clocks: core %lu Hz, DMA %lu Hz\n", core_hz, dma_hz);
     return 0;
 fail:

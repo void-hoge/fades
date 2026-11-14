@@ -102,7 +102,7 @@ def stream(path, ntx, nrx):
         assert not d.poll.poll(0), "CPU-owned initial buffers reported as completed"
         d.start()
         expect_errno(errno.EBUSY, d.start)
-        expect_errno(errno.ENOTTY, lambda: fcntl.ioctl(d.fd, BASE | 6))
+        expect_errno(errno.ENOTTY, lambda: fcntl.ioctl(d.fd, BASE | 7))
         d.stop()
         # TX must wait for receive capacity. Stop cancels queued work.
         d.queue(0, 0, 1)

@@ -69,7 +69,7 @@ static void setup(struct fades_device *device) {
         fail("open /dev/fades");
     }
     struct fades_dma_info info = {0};
-    if (ioctl(device->fd, FADES_DMA_INFO, &info) < 0) {
+    if (ioctl(device->fd, FADESIOC_DMA_INFO, &info) < 0) {
         fail("DMA_INFO");
     }
     if (info.abi_version != FADES_DMA_ABI_VERSION || info.slot_bytes != FADES_DMA_SLOT_BYTES) {
@@ -80,7 +80,7 @@ static void setup(struct fades_device *device) {
         .tx_buffers = device->buffer_counts[FADES_QUEUE_TX],
         .rx_buffers = device->buffer_counts[FADES_QUEUE_RX],
     };
-    if (ioctl(device->fd, FADES_DMA_CONFIG, &cfg) < 0) {
+    if (ioctl(device->fd, FADESIOC_DMA_CONFIG, &cfg) < 0) {
         fail("DMA_CONFIG");
     }
     for (enum fades_queue direction = FADES_QUEUE_TX; direction <= FADES_QUEUE_RX; direction++) {
@@ -91,7 +91,7 @@ static void setup(struct fades_device *device) {
         }
         for (unsigned index = 0; index < device->buffer_counts[direction]; index++) {
             struct fades_buffer_info buffer = {.queue = direction, .index = index};
-            if (ioctl(device->fd, FADES_QUERYBUF, &buffer) < 0) {
+            if (ioctl(device->fd, FADESIOC_QUERYBUF, &buffer) < 0) {
                 fail("QUERYBUF");
             }
             device->mapped_buffers[direction][index] =
@@ -107,7 +107,7 @@ static void setup(struct fades_device *device) {
 static void queue(struct fades_device *device, enum fades_queue direction, unsigned index,
                   unsigned records) {
     struct fades_buffer buffer = {.queue = direction, .index = index, .records = records};
-    if (ioctl(device->fd, FADES_QBUF, &buffer) < 0) {
+    if (ioctl(device->fd, FADESIOC_QBUF, &buffer) < 0) {
         fail("QBUF");
     }
 }
@@ -115,7 +115,7 @@ static void queue(struct fades_device *device, enum fades_queue direction, unsig
 static int try_dequeue(struct fades_device *device, enum fades_queue direction,
                        struct fades_buffer *buffer) {
     *buffer = (struct fades_buffer){.queue = direction};
-    if (ioctl(device->fd, FADES_DQBUF, buffer) == 0) {
+    if (ioctl(device->fd, FADESIOC_DQBUF, buffer) == 0) {
         return 1;
     }
     if (errno == EAGAIN || errno == EINTR) {
@@ -249,7 +249,7 @@ int main(int argc, char **argv) {
     // 計測開始して STREAMON
     double begin = now();
     double deadline = begin + seconds;
-    control(device.fd, FADES_STREAMON);
+    control(device.fd, FADESIOC_STREAMON);
     int feeding = 1;
     while (feeding || received != submitted) {
         // 計測時間が終わったら、出力だけ待つ
@@ -274,7 +274,7 @@ int main(int argc, char **argv) {
     double elapsed = now() - begin;
     // 集計
     struct fades_solver_stats stats;
-    if (ioctl(device.fd, FADES_SOLVER_STATS, &stats) < 0) {
+    if (ioctl(device.fd, FADESIOC_SOLVER_STATS, &stats) < 0) {
         fail("SOLVER_STATS");
     }
     if (stats.accepted != submitted || stats.emitted != submitted ||
@@ -288,7 +288,7 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
     }
     // デバイスの停止
-    control(device.fd, FADES_STREAMOFF);
+    control(device.fd, FADESIOC_STREAMOFF);
     printf("Stream (no output read): TX/RX=%u/%u, %" PRIu64 " records, %.6f s, %.6f Mproblem/s\n",
            device.buffer_counts[FADES_QUEUE_TX], device.buffer_counts[FADES_QUEUE_RX], received,
            elapsed, received / elapsed / 1e6);
