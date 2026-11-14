@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: MIT
- * 64 バイトの生レコードを扱う。host/README.md を参照。
- * 指定時間だけ入力コピーと ID 更新を継続し、結果は件数のみを数える。
+ * Processes raw 64-byte records; see host/README.md.
+ * Copies input and updates IDs for the specified duration, counting results without reading them.
  */
 #define _POSIX_C_SOURCE 200809L
 #define _FILE_OFFSET_BITS 64
@@ -23,9 +23,10 @@
 #include "fades_ioctl.h"
 
 /**
- * @brief ツールが利用するデバイス fd と、方向別のバッファマッピング。
- * @details setup() で指定個数のバッファを確保・mmap し、キュー方向とバッファ番号で参照する。
- * 終了時は STREAMOFF 後に全マッピングと配列を解放し、fd を閉じる。
+ * @brief Device fd and per-direction buffer mappings used by the tool.
+ * @details setup() allocates and maps the requested buffers, indexed by queue direction
+ * and buffer number. At shutdown, STREAMOFF is followed by releasing all mappings and
+ * arrays and closing the fd.
  */
 struct fades_device {
     int fd;
@@ -35,7 +36,7 @@ struct fades_device {
 
 static void fail(const char *what) {
     perror(what);
-    exit(EXIT_FAILURE); /* fd と VMA の解放により DMA が停止し、バッファも解放される。 */
+    exit(EXIT_FAILURE); /* Releasing the fd and VMAs stops DMA and frees the buffers. */
 }
 
 static void control(int fd, unsigned long cmd) {
@@ -140,8 +141,8 @@ static void wait_ready(struct fades_device *device, short events) {
     }
 }
 
-/* ストリーミング計測用。各レコードを 1 回だけコピーし、書き込み前に ID を差し替える。
- * キャッシュされない TX 領域を、ID 更新のためにストライドアクセスで再走査せずに済む。 */
+/* For streaming benchmarks: copy each record once, replacing its ID before writing.
+ * This avoids rescanning the uncached TX region with strided accesses to update IDs. */
 static void copy_records(uint8_t *dst, const uint8_t *src, unsigned count, uint64_t first) {
     for (unsigned index = 0; index < count; index++) {
         const uint8_t *source_record = src + (size_t)index * 64;
@@ -232,7 +233,7 @@ int main(int argc, char **argv) {
     };
     setup(&device);
 
-    // 出力バッファを全てエンキュー
+    // Enqueue all output buffers.
     for (unsigned index = 0; index < device.buffer_counts[FADES_QUEUE_RX]; index++) {
         queue(&device, FADES_QUEUE_RX, index, 0);
     }
@@ -240,25 +241,25 @@ int main(int argc, char **argv) {
     uint64_t submitted = 0;
     uint64_t received = 0;
     size_t position = 0;
-    // 初回の問題を埋めて全てエンキュー
+    // Fill and enqueue all initial input buffers.
     for (unsigned index = 0; index < device.buffer_counts[FADES_QUEUE_TX]; index++) {
         fill(device.mapped_buffers[FADES_QUEUE_TX][index], source, records, &position, submitted);
         queue(&device, FADES_QUEUE_TX, index, FADES_RECORDS_PER_SLOT);
         submitted += FADES_RECORDS_PER_SLOT;
     }
-    // 計測開始して STREAMON
+    // Start timing and streaming.
     double begin = now();
     double deadline = begin + seconds;
     control(device.fd, FADESIOC_STREAMON);
     int feeding = 1;
     while (feeding || received != submitted) {
-        // 計測時間が終わったら、出力だけ待つ
+        // After the timed interval, wait only for output.
         wait_ready(&device, POLLIN | (feeding ? POLLOUT : 0));
         if (feeding && now() >= deadline) {
             feeding = 0;
         }
         struct fades_buffer buffer;
-        // 計測時間内ならば、入力バッファを取り出して埋めてエンキュー
+        // During the timed interval, dequeue, fill and enqueue input buffers.
         if (feeding && try_dequeue(&device, FADES_QUEUE_TX, &buffer)) {
             fill(device.mapped_buffers[FADES_QUEUE_TX][buffer.index], source, records, &position,
                  submitted);
@@ -270,9 +271,9 @@ int main(int argc, char **argv) {
             queue(&device, FADES_QUEUE_RX, buffer.index, 0);
         }
     }
-    // 計測終了
+    // Stop timing.
     double elapsed = now() - begin;
-    // 集計
+    // Check statistics.
     struct fades_solver_stats stats;
     if (ioctl(device.fd, FADESIOC_SOLVER_STATS, &stats) < 0) {
         fail("SOLVER_STATS");
@@ -287,12 +288,12 @@ int main(int argc, char **argv) {
                 submitted);
         return EXIT_FAILURE;
     }
-    // デバイスの停止
+    // Stop the device.
     control(device.fd, FADESIOC_STREAMOFF);
     printf("Stream (no output read): TX/RX=%u/%u, %" PRIu64 " records, %.6f s, %.6f Mproblem/s\n",
            device.buffer_counts[FADES_QUEUE_TX], device.buffer_counts[FADES_QUEUE_RX], received,
            elapsed, received / elapsed / 1e6);
-    // 片付け
+    // Clean up.
     for (enum fades_queue direction = FADES_QUEUE_TX; direction <= FADES_QUEUE_RX; direction++) {
         for (unsigned index = 0; index < device.buffer_counts[direction]; index++) {
             if (munmap(device.mapped_buffers[direction][index], FADES_DMA_SLOT_BYTES)) {
