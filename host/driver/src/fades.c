@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-// 求解器と AXI DMA SG エンジンをキュー経由で排他管理する。
+// Exclusive queued management of the solver and AXI DMA SG engine.
 #include <linux/clk.h>
 #include <linux/delay.h>
 #include <linux/dma-mapping.h>
@@ -56,86 +56,87 @@ static_assert(RING_SIZE >= 2);
 #define BD_ERRORS GENMASK(30, 28)
 #define BD_LENGTH GENMASK(22, 0)
 
-/* AXI DMA の非サイクリック SG。変更しない next ポインターを事前に連結し、
- * 準備済みディスクリプターを dma_wmb + TAILDESC で公開する。回収は COMPLETE 後のみ。
- * XAxiDma_BdRing{Alloc,ToHw,FromHw,Free} と同様に active で所有数を明示管理するため、
- * リングの全エントリーを使用できる。完了バッファは BD の回収後も保持できる。 */
+/* 64-byte transfer descriptor read and written by AXI DMA. */
 struct fades_bd {
-    __le32 next, next_hi, address, address_hi;
+    __le32 next;       /* Low DMA address of the next BD; immutable after initialization. */
+    __le32 next_hi;    /* High DMA address of the next BD. */
+    __le32 address;    /* Low DMA address of the data buffer. */
+    __le32 address_hi; /* High DMA address of the data buffer. */
     __le32 reserved[2];
-    __le32 control, status;
-    __le32 app[5], padding[3];
+    __le32 control;    /* Transfer length and TX packet boundary flags. */
+    __le32 status;     /* DMA completion, error status and actual transfer length. */
+    __le32 app[5];     /* Unused. */
+    __le32 padding[3]; /* Padding to a 64-byte boundary. */
 } __aligned(64);
 
-enum slot_state { CPU, QUEUED, ACTIVE, DONE };
+enum buffer_state {
+    CPU,    /* Owned by userspace. */
+    QUEUED, /* Waiting for DMA submission. */
+    ACTIVE, /* Submitted to DMA. */
+    DONE,   /* DMA complete; waiting for userspace dequeue. */
+};
 
+/* FIFO of buffer indices awaiting DMA submission or userspace dequeue. */
 struct fades_fifo {
-    u32 *indices, capacity, head, count;
+    u32 *indices;
+    u32 capacity;
+    u32 head;
+    u32 count; /* Distinguishes empty from full, allowing every entry to be used. */
 };
 
-struct fades_slot {
-    enum slot_state state;
-    u32 records;
-    void *cpu;
-    struct page *pages; /* RX: キャッシュ可能なストリーミング DMA 用の割り当て。 */
-    dma_addr_t address;
+/* Addresses and ownership state of a 1 MiB data buffer. */
+struct fades_data_buffer {
+    enum buffer_state state;
+    u32 records; /* TX input count; RX capacity at submission or actual count at completion. */
+    void *cpu;   /* Kernel virtual address. */
+    struct page *pages; /* RX DMA allocation; NULL for TX. */
+    dma_addr_t address; /* DMA address of the data buffer. */
 };
 
+/* Buffer pool, pending queues and DMA ring for one TX or RX channel. */
 struct fades_channel {
-    struct fades_bd *bd;
-    dma_addr_t bd_address;
-    u32 head, tail, active;
-    u32 owners[RING_SIZE];
-    struct fades_slot *slots;
-    u32 count;
-    struct fades_fifo pending, done;
+    struct fades_bd *bd;   /* BD ring. */
+    dma_addr_t bd_address; /* DMA address of the ring. */
+    u32 head;              /* Next BD to check for completion. */
+    u32 tail;              /* Next BD to submit. */
+    u32 active;            /* Number of submitted BDs not yet reclaimed. */
+    u32 owners[RING_SIZE]; /* Corresponding buffers index for each BD. */
+    struct fades_data_buffer *buffers;
+    u32 count;                 /* Number of allocated buffers. */
+    struct fades_fifo pending; /* Waiting for DMA submission. */
+    struct fades_fifo done;    /* Waiting for userspace dequeue. */
 };
 
-struct fades_dma {
+/* Device state for the solver and its dedicated AXI DMA. */
+struct fades_device {
     struct miscdevice misc;
     struct device *dev;
-    struct mutex lock;
-    struct kref refs;
-    wait_queue_head_t wait;
-    struct fades_channel channels[2];
-    void __iomem *control, *dma;
-    int irq[2];
-    bool opened, removed, faulted, running;
+    struct mutex lock;                /* Serializes buffer, queue and hardware operations. */
+    struct kref refs;                 /* References held by the device and open file. */
+    wait_queue_head_t wait;           /* Notifies poll waiters of completion, errors and stop. */
+    struct fades_channel channels[2]; /* TX/RX channels indexed by fades_queue. */
+    void __iomem *control;            /* Solver control registers. */
+    void __iomem *dma;                /* AXI DMA registers. */
+    int irq[2];                       /* TX/RX IRQ numbers. */
+    bool opened;                      /* Exclusive open remains held while VMAs exist. */
+    bool removed;
+    bool faulted;
+    bool running;
+    bool stopped; /* After successful STREAMOFF, poll reports HUP until STREAMON. */
 };
 
-static u32 fifo_front(struct fades_fifo *f) {
-    return f->indices[f->head];
+/* Get the AXI DMA register block for the selected direction. */
+static void __iomem *channel_regs(struct fades_device *d, enum fades_queue direction) {
+    return d->dma + (direction == FADES_QUEUE_RX ? 0x30 : 0);
 }
 
-static u32 fifo_pop(struct fades_fifo *f) {
-    u32 index = fifo_front(f);
-    f->head = (f->head + 1) % f->capacity;
-    f->count--;
-    return index;
-}
-
-static void fifo_push(struct fades_fifo *f, u32 index) {
-    f->indices[(f->head + f->count++) % f->capacity] = index;
-}
-
-static void __iomem *channel_regs(struct fades_dma *d, u32 q) {
-    return d->dma + (q == FADES_QUEUE_RX ? 0x30 : 0);
-}
-
-static void write_address(void __iomem *reg, dma_addr_t address) {
-    /* AXI DMA の拡張アドレスレジスターは下位、上位の順に書き込む。
-     * 提供側の lo_hi_writeq と同じ順序で、上位の書き込みでポインターが確定する。 */
-    writel(lower_32_bits(address), reg);
-    writel(upper_32_bits(address), reg + 4);
-}
-
-static void free_buffers(struct fades_dma *d) {
-    unsigned int q, i;
-
-    for (q = 0; q < 2; q++) {
-        struct fades_channel *c = &d->channels[q];
-        for (i = 0; c->slots && i < c->count; i++) {
-            struct fades_slot *s = &c->slots[i];
+/* Free data buffers and queues after DMA stops, under exclusion; partial allocations are supported.
+ */
+static void free_buffers(struct fades_device *d) {
+    for (enum fades_queue direction = FADES_QUEUE_TX; direction <= FADES_QUEUE_RX; direction++) {
+        struct fades_channel *c = &d->channels[direction];
+        for (unsigned int i = 0; c->buffers && i < c->count; i++) {
+            struct fades_data_buffer *s = &c->buffers[i];
             if (s->pages) {
                 dma_free_pages(d->dev, FADES_DMA_SLOT_BYTES, s->pages, s->address,
                                DMA_BIDIRECTIONAL);
@@ -143,20 +144,177 @@ static void free_buffers(struct fades_dma *d) {
                 dma_free_coherent(d->dev, FADES_DMA_SLOT_BYTES, s->cpu, s->address);
             }
         }
-        kfree(c->slots);
+        kfree(c->buffers);
         kfree(c->pending.indices);
         kfree(c->done.indices);
-        c->slots = NULL;
+        c->buffers = NULL;
         c->count = 0;
         memset(&c->pending, 0, sizeof(c->pending));
         memset(&c->done, 0, sizeof(c->done));
     }
 }
 
-static int configure_buffers(struct fades_dma *d, const struct fades_dma_config *cfg) {
-    unsigned int q, i;
+/* Reset both DMA channels and the solver under exclusion; failure does not guarantee DMA stopped.
+ */
+static int hardware_reset(struct fades_device *d) {
+    writel(0, channel_regs(d, FADES_QUEUE_TX) + DMA_CR);
+    writel(0, channel_regs(d, FADES_QUEUE_RX) + DMA_CR);
+    writel(DMA_RESET, d->dma + DMA_CR);
+    u32 status;
+    int ret = readl_poll_timeout(d->dma + DMA_CR, status, !(status & DMA_RESET), 1, 100000);
 
-    if (d->channels[0].count) {
+    writel(1, d->control);
+    readl(d->control);
+    usleep_range(20, 40);
+    return ret;
+}
+
+/* Stop transfers under the mutex; on success, return all buffers to CPU ownership. */
+static int fades_stop(struct fades_device *d) {
+    int ret = hardware_reset(d);
+
+    d->running = false;
+    d->faulted = ret != 0;
+    if (ret) {
+        /* DMA ownership is uncertain; do not sync, reuse or free its memory. */
+        wake_up_interruptible(&d->wait);
+        return ret;
+    }
+    for (enum fades_queue direction = FADES_QUEUE_TX; direction <= FADES_QUEUE_RX; direction++) {
+        struct fades_channel *c = &d->channels[direction];
+        if (direction == FADES_QUEUE_RX) {
+            for (unsigned int index = 0; index < c->count; index++) {
+                if (c->buffers[index].state == ACTIVE) {
+                    dma_sync_single_for_cpu(d->dev, c->buffers[index].address, FADES_DMA_SLOT_BYTES,
+                                            DMA_BIDIRECTIONAL);
+                }
+            }
+        }
+        for (unsigned int index = 0; index < c->count; index++) {
+            c->buffers[index].state = CPU;
+            c->buffers[index].records = 0;
+        }
+        c->pending.head = c->pending.count = 0;
+        c->done.head = c->done.count = 0;
+        c->head = c->tail = c->active = 0;
+    }
+    wake_up_interruptible(&d->wait);
+    return ret;
+}
+
+/* Open the device exclusively and give the file a reference. */
+static int fades_open(struct inode *inode, struct file *file) {
+    struct fades_device *d = container_of(file->private_data, struct fades_device, misc);
+    int ret = 0;
+
+    mutex_lock(&d->lock);
+    if (d->removed) {
+        ret = -ENODEV;
+    } else if (d->opened) {
+        ret = -EBUSY;
+    } else {
+        /* A failed reset on the previous close leaves memory quarantined.
+         * Recover before exposing a new session. */
+        if (d->channels[FADES_QUEUE_TX].count) {
+            ret = fades_stop(d);
+            if (!ret) {
+                free_buffers(d);
+            }
+        }
+        if (!ret) {
+            d->opened = true;
+            d->stopped = false;
+            kref_get(&d->refs);
+            file->private_data = d;
+        }
+    }
+    mutex_unlock(&d->lock);
+    return ret;
+}
+
+/* Free the buffers, rings and state when the last device reference is released. */
+static void fades_free(struct kref *ref) {
+    struct fades_device *d = container_of(ref, struct fades_device, refs);
+    free_buffers(d);
+    for (enum fades_queue direction = FADES_QUEUE_TX; direction <= FADES_QUEUE_RX; direction++) {
+        struct fades_channel *c = &d->channels[direction];
+        if (c->bd) {
+            dma_free_coherent(d->dev, sizeof(*c->bd) * RING_SIZE, c->bd, c->bd_address);
+        }
+    }
+    put_device(d->dev);
+    kfree(d);
+}
+
+/* Stop transfers and release exclusive ownership on the last file reference. */
+static int fades_release(struct inode *inode, struct file *file) {
+    struct fades_device *d = file->private_data;
+    mutex_lock(&d->lock);
+    /* After removal, use the previous stop result without touching registers. */
+    int ret = d->removed ? (d->faulted ? -EIO : 0) : fades_stop(d);
+    if (!ret) {
+        free_buffers(d);
+    }
+    d->opened = false;
+    mutex_unlock(&d->lock);
+    kref_put(&d->refs, fades_free);
+    return 0;
+}
+
+/* Map a QUERYBUF-selected buffer into userspace. */
+static int fades_mmap(struct file *file, struct vm_area_struct *vma) {
+    struct fades_device *d = file->private_data;
+    const unsigned long pages = FADES_DMA_SLOT_BYTES >> PAGE_SHIFT;
+    unsigned long number = vma->vm_pgoff / pages;
+    unsigned long queue_number = number / FADES_DMA_MAX_BUFFERS;
+    unsigned long index = number % FADES_DMA_MAX_BUFFERS;
+    /* Validate the untrusted offset in a wide integer before converting it to an enum. */
+    if (!(vma->vm_flags & VM_SHARED) || vma->vm_end - vma->vm_start != FADES_DMA_SLOT_BYTES ||
+        vma->vm_pgoff % pages || queue_number > FADES_QUEUE_RX) {
+        return -EINVAL;
+    }
+    enum fades_queue direction = (enum fades_queue)queue_number;
+    int ret;
+    mutex_lock(&d->lock);
+    if (d->removed) {
+        ret = -ENODEV;
+    } else if (index >= d->channels[direction].count) {
+        ret = -EINVAL;
+    } else {
+        struct fades_data_buffer *s = &d->channels[direction].buffers[index];
+        vma->vm_pgoff = 0;
+        if (s->pages) {
+            ret = dma_mmap_pages(d->dev, vma, FADES_DMA_SLOT_BYTES, s->pages);
+        } else {
+            ret = dma_mmap_coherent(d->dev, vma, s->cpu, s->address, FADES_DMA_SLOT_BYTES);
+        }
+    }
+    mutex_unlock(&d->lock);
+    /* The VMA holds a file reference, keeping the buffers alive. */
+    return ret;
+}
+
+/* Inspect the front of a nonempty queue under exclusion. */
+static u32 fifo_front(struct fades_fifo *f) {
+    return f->indices[f->head];
+}
+
+/* Pop the front of a nonempty queue under exclusion. */
+static u32 fifo_pop(struct fades_fifo *f) {
+    u32 index = fifo_front(f);
+    f->head = (f->head + 1) % f->capacity;
+    f->count--;
+    return index;
+}
+
+/* Push under exclusion; the caller checks capacity and duplicates. */
+static void fifo_push(struct fades_fifo *f, u32 index) {
+    f->indices[(f->head + f->count++) % f->capacity] = index;
+}
+
+/* Allocate TX/RX buffers and queues under the mutex; roll back on failure. */
+static int configure_buffers(struct fades_device *d, const struct fades_dma_config *cfg) {
+    if (d->channels[FADES_QUEUE_TX].count) {
         return -EBUSY;
     }
     if (!cfg->tx_buffers || cfg->tx_buffers > FADES_DMA_MAX_BUFFERS || !cfg->rx_buffers ||
@@ -167,20 +325,20 @@ static int configure_buffers(struct fades_dma *d, const struct fades_dma_config 
         ((u64)totalram_pages() << PAGE_SHIFT)) {
         return -ENOMEM;
     }
-    for (q = 0; q < 2; q++) {
-        struct fades_channel *c = &d->channels[q];
-        c->count = q ? cfg->rx_buffers : cfg->tx_buffers;
-        c->slots = kcalloc(c->count, sizeof(*c->slots), GFP_KERNEL);
+    for (enum fades_queue direction = FADES_QUEUE_TX; direction <= FADES_QUEUE_RX; direction++) {
+        struct fades_channel *c = &d->channels[direction];
+        c->count = direction == FADES_QUEUE_RX ? cfg->rx_buffers : cfg->tx_buffers;
+        c->buffers = kcalloc(c->count, sizeof(*c->buffers), GFP_KERNEL);
         c->pending.indices = kcalloc(c->count, sizeof(u32), GFP_KERNEL);
         c->done.indices = kcalloc(c->count, sizeof(u32), GFP_KERNEL);
         c->pending.capacity = c->done.capacity = c->count;
-        if (!c->slots || !c->pending.indices || !c->done.indices) {
+        if (!c->buffers || !c->pending.indices || !c->done.indices) {
             goto fail;
         }
-        for (i = 0; i < c->count; i++) {
-            struct fades_slot *s = &c->slots[i];
+        for (unsigned int i = 0; i < c->count; i++) {
+            struct fades_data_buffer *s = &c->buffers[i];
             gfp_t flags = GFP_KERNEL | __GFP_ZERO | __GFP_NORETRY | __GFP_NOWARN;
-            if (q == FADES_QUEUE_RX) {
+            if (direction == FADES_QUEUE_RX) {
                 s->pages = dma_alloc_pages(d->dev, FADES_DMA_SLOT_BYTES, &s->address,
                                            DMA_BIDIRECTIONAL, flags);
                 if (s->pages) {
@@ -198,103 +356,46 @@ static int configure_buffers(struct fades_dma *d, const struct fades_dma_config 
     }
     return 0;
 fail:
+    /* Nothing has been exposed to DMA, so partial allocations can be freed. */
     free_buffers(d);
     return -ENOMEM;
 }
 
-static void fades_free(struct kref *ref) {
-    struct fades_dma *d = container_of(ref, struct fades_dma, refs);
-    unsigned int q;
-
-    free_buffers(d);
-    for (q = 0; q < 2; q++) {
-        struct fades_channel *c = &d->channels[q];
-        if (c->bd) {
-            dma_free_coherent(d->dev, sizeof(*c->bd) * RING_SIZE, c->bd, c->bd_address);
-        }
-    }
-    put_device(d->dev);
-    kfree(d);
+/* Set an AXI DMA 64-bit address under exclusion. */
+static void write_address(void __iomem *reg, dma_addr_t address) {
+    /* AXI DMA extended-address registers use low-then-high writes, matching
+     * the provider's lo_hi_writeq; the high write commits the pointer. */
+    writel(lower_32_bits(address), reg);
+    writel(upper_32_bits(address), reg + 4);
 }
 
-/* リセットは AXI DMA の両チャネルに影響する。呼び出し側で mutex を保持すること。 */
-static int hardware_reset(struct fades_dma *d) {
-    u32 status;
-    int ret;
-
-    writel(0, channel_regs(d, 0) + DMA_CR);
-    writel(0, channel_regs(d, 1) + DMA_CR);
-    writel(DMA_RESET, d->dma + DMA_CR);
-    ret = readl_poll_timeout(d->dma + DMA_CR, status, !(status & DMA_RESET), 1, 100000);
-    writel(1, d->control);
-    readl(d->control);
-    usleep_range(20, 40);
-    return ret;
-}
-
-static int fades_stop(struct fades_dma *d) {
-    unsigned int q;
-    int ret = hardware_reset(d);
-
-    d->running = false;
-    d->faulted = ret != 0;
-    if (ret) {
-        /* DMA の所有状態が不明なため、メモリーを同期・再利用・解放しない。 */
-        wake_up_interruptible(&d->wait);
-        return ret;
-    }
-    for (q = 0; q < 2; q++) {
-        struct fades_channel *c = &d->channels[q];
-        unsigned int index;
-        if (q == FADES_QUEUE_RX) {
-            for (index = 0; index < c->count; index++) {
-                if (c->slots[index].state == ACTIVE) {
-                    dma_sync_single_for_cpu(d->dev, c->slots[index].address, FADES_DMA_SLOT_BYTES,
-                                            DMA_BIDIRECTIONAL);
-                }
-            }
-        }
-        for (index = 0; index < c->count; index++) {
-            c->slots[index].state = CPU;
-            c->slots[index].records = 0;
-        }
-        c->pending.head = c->pending.count = 0;
-        c->done.head = c->done.count = 0;
-        c->head = c->tail = c->active = 0;
-    }
-    wake_up_interruptible(&d->wait);
-    return ret;
-}
-
-static int fades_start(struct fades_dma *d) {
-    unsigned int q, i;
-    int ret;
-
+/* Initialize DMA and the solver under the mutex, registering prequeued input counts. */
+static int fades_start(struct fades_device *d) {
     if (d->running) {
         return -EBUSY;
     }
     if (d->faulted) {
         return -EIO;
     }
-    if (!d->channels[0].count) {
+    if (!d->channels[FADES_QUEUE_TX].count) {
         return -EINVAL;
     }
-    ret = hardware_reset(d);
+    int ret = hardware_reset(d);
     if (ret) {
         d->faulted = true;
         return ret;
     }
-    for (q = 0; q < 2; q++) {
-        struct fades_channel *c = &d->channels[q];
+    for (enum fades_queue direction = FADES_QUEUE_TX; direction <= FADES_QUEUE_RX; direction++) {
+        struct fades_channel *c = &d->channels[direction];
         memset(c->bd, 0, sizeof(*c->bd) * RING_SIZE);
         c->head = c->tail = c->active = 0;
-        for (i = 0; i < RING_SIZE; i++) {
+        for (unsigned int i = 0; i < RING_SIZE; i++) {
             dma_addr_t next = c->bd_address + ((i + 1) % RING_SIZE) * sizeof(*c->bd);
             c->bd[i].next = cpu_to_le32(lower_32_bits(next));
             c->bd[i].next_hi = cpu_to_le32(upper_32_bits(next));
         }
-        write_address(channel_regs(d, q) + DMA_CUR, c->bd_address);
-        writel(DMA_IRQ | BIT(16) | BIT(0), channel_regs(d, q) + DMA_CR);
+        write_address(channel_regs(d, direction) + DMA_CUR, c->bd_address);
+        writel(DMA_IRQ | BIT(16) | BIT(0), channel_regs(d, direction) + DMA_CR);
     }
     dma_wmb();
     writel(FADES_RECORDS_PER_SLOT, d->control + 4);
@@ -303,173 +404,69 @@ static int fades_start(struct fades_dma *d) {
     usleep_range(20, 40);
     d->running = true;
     d->faulted = false;
-    /* DMA 開始前に、受信バッファ待ちの TX ディスクリプターも含め、受理済みの全入力を
-     * 登録する。誤ってアイドルと判定し、出力を途中で区切ることを防ぐ。 */
-    for (i = 0; i < d->channels[0].count; i++) {
-        if (d->channels[0].slots[i].state == QUEUED) {
-            writel(d->channels[0].slots[i].records, d->control + 8);
+    /* Register all accepted input before DMA starts, including TX waiting for
+     * receive capacity, to prevent false idle detection and premature output cuts. */
+    for (unsigned int i = 0; i < d->channels[FADES_QUEUE_TX].count; i++) {
+        if (d->channels[FADES_QUEUE_TX].buffers[i].state == QUEUED) {
+            writel(d->channels[FADES_QUEUE_TX].buffers[i].records, d->control + 8);
         }
     }
     readl(d->control + 8);
     return 0;
 }
 
-static void submit_bd(struct fades_dma *d, u32 q, u32 index, u32 records) {
-    struct fades_channel *c = &d->channels[q];
+/* Submit a dequeued pending buffer under the mutex; the DMA ring must have space. */
+static void submit_bd(struct fades_device *d, enum fades_queue direction, u32 index, u32 records) {
+    struct fades_channel *c = &d->channels[direction];
     struct fades_bd *bd = &c->bd[c->tail];
-    dma_addr_t address = c->slots[index].address;
+    dma_addr_t address = c->buffers[index].address;
 
-    if (q == FADES_QUEUE_RX) {
+    if (direction == FADES_QUEUE_RX) {
         dma_sync_single_for_device(d->dev, address, FADES_DMA_SLOT_BYTES, DMA_BIDIRECTIONAL);
     }
     bd->address = cpu_to_le32(lower_32_bits(address));
     bd->address_hi = cpu_to_le32(upper_32_bits(address));
-    bd->control = cpu_to_le32(records * 64 | (q == FADES_QUEUE_TX ? BIT(27) | BIT(26) : 0));
+    bd->control = cpu_to_le32(records * 64 | (direction == FADES_QUEUE_TX ? BIT(27) | BIT(26) : 0));
     WRITE_ONCE(bd->status, 0);
     c->owners[c->tail] = index;
-    c->slots[index].records = records;
-    c->slots[index].state = ACTIVE;
+    c->buffers[index].records = records;
+    c->buffers[index].state = ACTIVE;
+    /* Finalize the BD and bookkeeping before publishing them via the tail address. */
     dma_wmb();
-    write_address(channel_regs(d, q) + DMA_TAIL, c->bd_address + c->tail * sizeof(*bd));
+    write_address(channel_regs(d, direction) + DMA_TAIL, c->bd_address + c->tail * sizeof(*bd));
     c->tail = (c->tail + 1) % RING_SIZE;
     c->active++;
 }
 
-/* 全容量の RX ディスクリプターを独立に登録してから TX を供給する。
- * 複数の小さな入力が同じ出力スロットを埋めるため、TX ごとに RX を予約しない。
- * 受信の残り容量を超える入力は AXI の背圧で制御する。 */
-static void fades_schedule(struct fades_dma *d) {
-    struct fades_channel *tx = &d->channels[0], *rx = &d->channels[1];
+/* Submit pending RX then TX under the mutex; do not reserve one RX per TX. */
+static void fades_schedule(struct fades_device *d) {
+    struct fades_channel *tx = &d->channels[FADES_QUEUE_TX];
+    struct fades_channel *rx = &d->channels[FADES_QUEUE_RX];
 
     if (!d->running || d->faulted) {
         return;
     }
+    /* Publish receive capacity first, and submit input only while capacity exists. */
     while (rx->pending.count && rx->active < RING_SIZE) {
         submit_bd(d, FADES_QUEUE_RX, fifo_pop(&rx->pending), FADES_RECORDS_PER_SLOT);
     }
     while (tx->pending.count && tx->active < RING_SIZE && rx->active) {
         u32 index = fifo_pop(&tx->pending);
-        submit_bd(d, FADES_QUEUE_TX, index, tx->slots[index].records);
+        submit_bd(d, FADES_QUEUE_TX, index, tx->buffers[index].records);
     }
 }
 
-static irqreturn_t fades_irq(int irq, void *arg) {
-    struct fades_dma *d = arg;
-    unsigned int q;
-
-    mutex_lock(&d->lock);
-    if (d->removed) {
-        goto out;
-    }
-    for (q = 0; q < 2; q++) {
-        struct fades_channel *c = &d->channels[q];
-        u32 status = readl(channel_regs(d, q) + DMA_SR);
-        writel(status & (DMA_IRQ | BIT(13)), channel_regs(d, q) + DMA_SR);
-        if (!d->running) {
-            continue;
-        }
-        if (status & DMA_ERRORS) {
-            dev_err(d->dev, "channel %u DMA status %#x\n", q, status);
-            d->faulted = true;
-        }
-        while (c->active && !d->faulted) {
-            u32 done = le32_to_cpu(READ_ONCE(c->bd[c->head].status));
-            u32 index = c->owners[c->head];
-            u32 bytes = done & BD_LENGTH;
-            u32 capacity = c->slots[index].records * 64;
-            if (!(done & BD_COMPLETE)) {
-                break;
-            }
-            dma_rmb();
-            if ((done & BD_ERRORS) || !bytes || bytes % 64 || bytes > capacity ||
-                (q == FADES_QUEUE_TX && bytes != capacity)) {
-                dev_err(d->dev, "channel %u descriptor %#x expected %u bytes\n", q, done,
-                        c->slots[index].records * 64);
-                d->faulted = true;
-                break;
-            }
-            if (q == FADES_QUEUE_RX) {
-                dma_sync_single_for_cpu(d->dev, c->slots[index].address, bytes, DMA_BIDIRECTIONAL);
-            }
-            c->slots[index].records = bytes / 64;
-            c->slots[index].state = DONE;
-            fifo_push(&c->done, index);
-            c->head = (c->head + 1) % RING_SIZE;
-            c->active--;
-        }
-    }
-    if (d->running && (readl(d->control + 12) & 1)) {
-        d->faulted = true;
-    }
-    if (d->faulted) {
-        /* ユーザー空間から復旧できるようにする前に両エンジンを停止する。
-         * 部分転送の場合も、STREAMOFF まではスロットの所有権を維持する。 */
-        writel(0, channel_regs(d, 0) + DMA_CR);
-        writel(0, channel_regs(d, 1) + DMA_CR);
-    } else {
-        fades_schedule(d);
-    }
-    wake_up_interruptible(&d->wait);
-out:
-    mutex_unlock(&d->lock);
-    return IRQ_HANDLED;
-}
-
-static int fades_open(struct inode *inode, struct file *file) {
-    struct fades_dma *d = container_of(file->private_data, struct fades_dma, misc);
-    int ret = 0;
-
-    mutex_lock(&d->lock);
-    if (d->removed) {
-        ret = -ENODEV;
-    } else if (d->opened) {
-        ret = -EBUSY;
-    } else {
-        /* 前回の close 時にリセットが失敗すると、メモリーは再利用禁止のまま残る。
-         * 新しいセッションを公開する前に復旧する。 */
-        if (d->channels[0].count) {
-            ret = fades_stop(d);
-            if (!ret) {
-                free_buffers(d);
-            }
-        }
-        if (!ret) {
-            d->opened = true;
-            kref_get(&d->refs);
-            file->private_data = d;
-        }
-    }
-    mutex_unlock(&d->lock);
-    return ret;
-}
-
-static int fades_release(struct inode *inode, struct file *file) {
-    struct fades_dma *d = file->private_data;
-    int ret;
-
-    mutex_lock(&d->lock);
-    ret = d->removed ? (d->faulted ? -EIO : 0) : fades_stop(d);
-    if (!ret) {
-        free_buffers(d);
-    }
-    d->opened = false;
-    mutex_unlock(&d->lock);
-    kref_put(&d->refs, fades_free);
-    return 0;
-}
-
-/* スナップショット済みの64ビットカウンターを取得する。 */
-static u64 read_counter(struct fades_dma *d, unsigned int index) {
+/* Read a snapshot 64-bit counter under the mutex. */
+static u64 read_counter(struct fades_device *d, unsigned int index) {
     u32 low = readl(d->control + 0x100 + index * 8);
     u32 high = readl(d->control + 0x104 + index * 8);
     return (u64)high << 32 | low;
 }
 
+/* Validate ioctl requests and serialize buffer and hardware operations. */
 static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) {
-    struct fades_dma *d = file->private_data;
+    struct fades_device *d = file->private_data;
     void __user *user = (void __user *)arg;
-    struct fades_buffer b;
-    struct fades_channel *c;
     int ret = 0;
 
     if (mutex_lock_interruptible(&d->lock)) {
@@ -485,8 +482,8 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
             .abi_version = FADES_DMA_ABI_VERSION,
             .slot_bytes = FADES_DMA_SLOT_BYTES,
             .max_buffers = FADES_DMA_MAX_BUFFERS,
-            .tx_buffers = d->channels[0].count,
-            .rx_buffers = d->channels[1].count,
+            .tx_buffers = d->channels[FADES_QUEUE_TX].count,
+            .rx_buffers = d->channels[FADES_QUEUE_RX].count,
         };
         ret = copy_to_user(user, &info, sizeof(info)) ? -EFAULT : 0;
         break;
@@ -506,7 +503,7 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
             ret = -EFAULT;
             break;
         }
-        if (info.queue > 1 || info.index >= d->channels[info.queue].count) {
+        if (info.queue > FADES_QUEUE_RX || info.index >= d->channels[info.queue].count) {
             ret = -EINVAL;
             break;
         }
@@ -519,19 +516,24 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
     case FADES_STREAMON:
         ret = fades_start(d);
         if (!ret) {
+            d->stopped = false;
             fades_schedule(d);
         }
         break;
     case FADES_STREAMOFF:
         ret = fades_stop(d);
+        if (!ret) {
+            d->stopped = true;
+        }
         break;
     case FADES_QBUF:
-    case FADES_DQBUF:
+    case FADES_DQBUF: {
+        struct fades_buffer b;
         if (copy_from_user(&b, user, sizeof(b))) {
             ret = -EFAULT;
             break;
         }
-        if (b.queue > 1 || b.reserved) {
+        if (b.queue > FADES_QUEUE_RX || b.reserved) {
             ret = -EINVAL;
             break;
         }
@@ -539,7 +541,7 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
             ret = -EIO;
             break;
         }
-        c = &d->channels[b.queue];
+        struct fades_channel *c = &d->channels[b.queue];
         if (!c->count) {
             ret = -EINVAL;
             break;
@@ -551,16 +553,17 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
                 ret = -EINVAL;
                 break;
             }
-            if (c->slots[b.index].state != CPU) {
+            if (c->buffers[b.index].state != CPU) {
                 ret = -EBUSY;
                 break;
             }
+            /* Register the count before DMA submission to prevent premature partial output. */
             if (b.queue == FADES_QUEUE_TX && d->running) {
                 writel(b.records, d->control + 8);
                 readl(d->control + 8);
             }
-            c->slots[b.index].state = QUEUED;
-            c->slots[b.index].records = b.records;
+            c->buffers[b.index].state = QUEUED;
+            c->buffers[b.index].records = b.records;
             fifo_push(&c->pending, b.index);
             fades_schedule(d);
         } else {
@@ -569,20 +572,20 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
                 break;
             }
             b.index = fifo_front(&c->done);
-            b.records = c->slots[b.index].records;
-            /* copy_to_user が失敗しても所有権や完了情報を失わないようにする。 */
+            b.records = c->buffers[b.index].records;
+            /* Preserve ownership and completion information if copy_to_user fails. */
             if (copy_to_user(user, &b, sizeof(b))) {
                 ret = -EFAULT;
                 break;
             }
             fifo_pop(&c->done);
-            c->slots[b.index].state = CPU;
+            c->buffers[b.index].state = CPU;
         }
         break;
+    }
     case FADES_SOLVER_STATS: {
         struct fades_solver_stats stats;
         u32 status;
-        unsigned int i;
         writel(1, d->control + 16);
         ret = readl_poll_timeout(d->control + 12, status, !(status & 2), 1, 100000);
         if (ret) {
@@ -594,7 +597,7 @@ static long fades_ioctl(struct file *file, unsigned int cmd, unsigned long arg) 
         stats.dispatched = read_counter(d, 3);
         stats.collected = read_counter(d, 4);
         stats.queue_empty_cycles = read_counter(d, 5);
-        for (i = 0; i < ARRAY_SIZE(stats.core_dispatched); i++) {
+        for (unsigned int i = 0; i < ARRAY_SIZE(stats.core_dispatched); i++) {
             stats.core_dispatched[i] = read_counter(d, 6 + i);
             stats.core_collected[i] = read_counter(d, 12 + i);
             stats.core_busy_cycles[i] = read_counter(d, 18 + i);
@@ -615,21 +618,25 @@ out:
     return ret;
 }
 
+/* Report TX/RX completion, stop and errors to poll without consuming completions. */
 static __poll_t fades_poll(struct file *file, poll_table *wait) {
-    struct fades_dma *d = file->private_data;
+    struct fades_device *d = file->private_data;
     __poll_t events = 0;
 
+    /* Register the wait queue before checking state to avoid missing a completion. */
     poll_wait(file, &d->wait, wait);
     mutex_lock(&d->lock);
     if (d->removed) {
         events = EPOLLERR | EPOLLHUP;
     } else if (d->faulted) {
         events = EPOLLERR;
+    } else if (d->stopped) {
+        events = EPOLLHUP;
     } else {
-        if (d->channels[0].done.count) {
+        if (d->channels[FADES_QUEUE_TX].done.count) {
             events |= EPOLLOUT | EPOLLWRNORM;
         }
-        if (d->channels[1].done.count) {
+        if (d->channels[FADES_QUEUE_RX].done.count) {
             events |= EPOLLIN | EPOLLRDNORM;
         }
     }
@@ -637,36 +644,68 @@ static __poll_t fades_poll(struct file *file, poll_table *wait) {
     return events;
 }
 
-static int fades_mmap(struct file *file, struct vm_area_struct *vma) {
-    struct fades_dma *d = file->private_data;
-    const unsigned long pages = FADES_DMA_SLOT_BYTES >> PAGE_SHIFT;
-    unsigned long number = vma->vm_pgoff / pages;
-    unsigned long q = number / FADES_DMA_MAX_BUFFERS;
-    unsigned long index = number % FADES_DMA_MAX_BUFFERS;
-    struct fades_slot *s;
-    int ret;
-
-    if (!(vma->vm_flags & VM_SHARED) || vma->vm_end - vma->vm_start != FADES_DMA_SLOT_BYTES ||
-        vma->vm_pgoff % pages || q > 1) {
-        return -EINVAL;
-    }
+/* Reclaim completions on both channels in a threaded IRQ and advance transfers and poll. */
+static irqreturn_t fades_irq(int irq, void *arg) {
+    struct fades_device *d = arg;
     mutex_lock(&d->lock);
     if (d->removed) {
-        ret = -ENODEV;
-    } else if (index >= d->channels[q].count) {
-        ret = -EINVAL;
-    } else {
-        s = &d->channels[q].slots[index];
-        vma->vm_pgoff = 0;
-        if (s->pages) {
-            ret = dma_mmap_pages(d->dev, vma, FADES_DMA_SLOT_BYTES, s->pages);
-        } else {
-            ret = dma_mmap_coherent(d->dev, vma, s->cpu, s->address, FADES_DMA_SLOT_BYTES);
+        goto out;
+    }
+    for (enum fades_queue direction = FADES_QUEUE_TX; direction <= FADES_QUEUE_RX; direction++) {
+        struct fades_channel *c = &d->channels[direction];
+        u32 status = readl(channel_regs(d, direction) + DMA_SR);
+        writel(status & (DMA_IRQ | BIT(13)), channel_regs(d, direction) + DMA_SR);
+        if (!d->running) {
+            continue;
+        }
+        if (status & DMA_ERRORS) {
+            dev_err(d->dev, "channel %u DMA status %#x\n", direction, status);
+            d->faulted = true;
+        }
+        while (c->active && !d->faulted) {
+            u32 done = le32_to_cpu(READ_ONCE(c->bd[c->head].status));
+            u32 index = c->owners[c->head];
+            u32 bytes = done & BD_LENGTH;
+            u32 capacity = c->buffers[index].records * 64;
+            if (!(done & BD_COMPLETE)) {
+                break;
+            }
+            /* After observing completion, make DMA writes visible and validate length and errors.
+             */
+            dma_rmb();
+            if ((done & BD_ERRORS) || !bytes || bytes % 64 || bytes > capacity ||
+                (direction == FADES_QUEUE_TX && bytes != capacity)) {
+                dev_err(d->dev, "channel %u descriptor %#x expected %u bytes\n", direction, done,
+                        c->buffers[index].records * 64);
+                d->faulted = true;
+                break;
+            }
+            if (direction == FADES_QUEUE_RX) {
+                dma_sync_single_for_cpu(d->dev, c->buffers[index].address, bytes,
+                                        DMA_BIDIRECTIONAL);
+            }
+            c->buffers[index].records = bytes / 64;
+            c->buffers[index].state = DONE;
+            fifo_push(&c->done, index);
+            c->head = (c->head + 1) % RING_SIZE;
+            c->active--;
         }
     }
+    if (d->running && (readl(d->control + 12) & 1)) {
+        d->faulted = true;
+    }
+    if (d->faulted) {
+        /* Stop both engines before userspace recovery. Retain buffer ownership
+         * until STREAMOFF, including for partially completed transfers. */
+        writel(0, channel_regs(d, FADES_QUEUE_TX) + DMA_CR);
+        writel(0, channel_regs(d, FADES_QUEUE_RX) + DMA_CR);
+    } else {
+        fades_schedule(d);
+    }
+    wake_up_interruptible(&d->wait);
+out:
     mutex_unlock(&d->lock);
-    /* VMA がファイルへの参照を保持するため、バッファも解放されずに維持される。 */
-    return ret;
+    return IRQ_HANDLED;
 }
 
 static const struct file_operations fades_fops = {
@@ -680,14 +719,12 @@ static const struct file_operations fades_fops = {
     .llseek = no_llseek,
 };
 
+/* Initialize the Device Tree device and expose /dev/fades. */
 static int fades_probe(struct platform_device *pdev) {
-    struct fades_dma *d;
-    struct clk *clk;
-    unsigned long dma_hz, core_hz;
-    unsigned int q, requested = 0;
+    unsigned int requested = 0;
     int ret;
 
-    d = kzalloc(sizeof(*d), GFP_KERNEL);
+    struct fades_device *d = kzalloc(sizeof(*d), GFP_KERNEL);
     if (!d) {
         return -ENOMEM;
     }
@@ -699,18 +736,20 @@ static int fades_probe(struct platform_device *pdev) {
     if (ret) {
         goto fail;
     }
-    clk = devm_clk_get_enabled(d->dev, "dma");
+    /* Enable DMA and core clocks before accessing registers. */
+    struct clk *clk = devm_clk_get_enabled(d->dev, "dma");
     if (IS_ERR(clk)) {
         ret = PTR_ERR(clk);
         goto fail;
     }
-    dma_hz = clk_get_rate(clk);
+    unsigned long dma_hz = clk_get_rate(clk);
     clk = devm_clk_get_enabled(d->dev, "core");
     if (IS_ERR(clk)) {
         ret = PTR_ERR(clk);
         goto fail;
     }
-    core_hz = clk_get_rate(clk);
+    unsigned long core_hz = clk_get_rate(clk);
+
     d->control = devm_platform_ioremap_resource(pdev, 0);
     if (IS_ERR(d->control)) {
         ret = PTR_ERR(d->control);
@@ -729,19 +768,20 @@ static int fades_probe(struct platform_device *pdev) {
     if (ret) {
         goto fail;
     }
-    for (q = 0; q < 2; q++) {
-        struct fades_channel *c = &d->channels[q];
+    for (enum fades_queue direction = FADES_QUEUE_TX; direction <= FADES_QUEUE_RX; direction++) {
+        struct fades_channel *c = &d->channels[direction];
         c->bd = dma_alloc_coherent(d->dev, sizeof(*c->bd) * RING_SIZE, &c->bd_address, GFP_KERNEL);
         if (!c->bd) {
             ret = -ENOMEM;
             goto fail;
         }
-        d->irq[q] = platform_get_irq(pdev, q);
-        if (d->irq[q] < 0) {
-            ret = d->irq[q];
+        d->irq[direction] = platform_get_irq(pdev, direction);
+        if (d->irq[direction] < 0) {
+            ret = d->irq[direction];
             goto fail;
         }
-        ret = request_threaded_irq(d->irq[q], NULL, fades_irq, IRQF_ONESHOT, dev_name(d->dev), d);
+        ret = request_threaded_irq(d->irq[direction], NULL, fades_irq, IRQF_ONESHOT,
+                                   dev_name(d->dev), d);
         if (ret) {
             goto fail;
         }
@@ -761,6 +801,7 @@ static int fades_probe(struct platform_device *pdev) {
     dev_info(d->dev, "actual clocks: core %lu Hz, DMA %lu Hz\n", core_hz, dma_hz);
     return 0;
 fail:
+    /* Wait for registered IRQs to finish before releasing partially initialized state. */
     while (requested) {
         free_irq(d->irq[--requested], d);
     }
@@ -768,23 +809,23 @@ fail:
     return ret;
 }
 
+/* Block new users, stop DMA and IRQs, and release the device-owned reference. */
 static void fades_remove(struct platform_device *pdev) {
-    struct fades_dma *d = platform_get_drvdata(pdev);
-    int ret;
-
+    struct fades_device *d = platform_get_drvdata(pdev);
     misc_deregister(&d->misc);
     mutex_lock(&d->lock);
-    ret = fades_stop(d);
+    int ret = fades_stop(d);
     d->removed = true;
     wake_up_interruptible(&d->wait);
     mutex_unlock(&d->lock);
-    free_irq(d->irq[0], d);
-    free_irq(d->irq[1], d);
+    /* Wait until running IRQs no longer reference the state before releasing it. */
+    free_irq(d->irq[FADES_QUEUE_TX], d);
+    free_irq(d->irq[FADES_QUEUE_RX], d);
     if (!ret) {
         kref_put(&d->refs, fades_free);
     } else {
-        /* HW がまだバスマスターとして動作している可能性があるため、メモリーを保持する。
-         * 別の所有者が再利用したメモリーへの DMA 書き込みを防ぐ。 */
+        /* Hardware might still bus-master. Keep memory pinned to prevent DMA
+         * writes into storage reused by another owner. */
         dev_err(d->dev, "DMA reset failed on remove; retaining DMA allocations\n");
     }
 }

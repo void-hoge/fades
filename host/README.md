@@ -102,6 +102,11 @@ open → CONFIG → 各面のQUERYBUF / mmap
   最終投入後はRXのみを待ち、回収件数が投入件数に達したら終了する。idle後の再投入も可能。
 - v7では `END_INPUT` を削除した。旧ioctl番号6は欠番で、呼び出すと `ENOTTY`。
 - `STREAMOFF` は転送をリセットし、全面をCPU所有に戻す。設定とマッピングは維持する。
+- `STREAMOFF` が成功すると、初回 `STREAMON` 前の呼び出しを含め、待機方向にかかわらず
+  `poll` は `POLLHUP` を返す。停止後にpollした場合も、次の `STREAMON` 成功まで通知が続く。
+  初回open直後は通知しない。停止失敗時は `POLLERR`、デバイス取り外し時は `POLLERR | POLLHUP`。
+- 複数スレッドでfdを共有する場合は、`STREAMOFF` 後に全poll待機スレッドが停止を確認して
+  終了するまで待ってから再開する。先に `STREAMON` が成功すると、停止通知を見逃しうる。
 - 同時openは1つ。VMAはファイルを保持するため、fdをcloseしてもmmapが残る間は
   メモリーと排他所有が維持される。終了時は明示的に停止し、全VMAとfdを解放する。
   最後の参照の解放後、次のopenは未設定状態から始まる。
@@ -131,6 +136,7 @@ DMAリングは方向ごとに32枠固定、バッファ数とは独立。1枠�
 build/kv260-ps/host/tools/fades_run input.raw 8 64 10
 
 python3 host/tests/check_abi.py
+python3 host/tests/check_poll_stop.py
 python3 host/tests/check_stream.py --tx 1 --rx 1
 python3 host/tests/check_stream.py --tx 8 --rx 64
 python3 host/tests/check_stream.py --tx 65 --rx 65
