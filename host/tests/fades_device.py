@@ -1,4 +1,4 @@
-"""Small real-board ABI v6 test helper (no record copies on dequeue)."""
+"""Small real-board ABI v7 test helper (no record copies on dequeue)."""
 import errno
 import fcntl
 import mmap
@@ -16,7 +16,7 @@ QUERY_CMD = (3 << 30) | (QUERY.size << 16) | BASE | 9
 QBUF = (1 << 30) | (BUF.size << 16) | BASE | 3
 DQBUF = (3 << 30) | (BUF.size << 16) | BASE | 4
 STATS = (2 << 30) | (352 << 16) | BASE | 2
-ON, END, OFF = (BASE | i for i in (5, 6, 7))
+ON, OFF = (BASE | i for i in (5, 7))
 STRIDE = 1024 * 1024
 RECORDS = STRIDE // 64
 
@@ -51,7 +51,7 @@ class Device:
         self.fd = os.open(path, os.O_RDWR | os.O_CLOEXEC)
         self.maps = [[], []]
         try:
-            assert info(self.fd) == (6, STRIDE, 4096, 0, 0, 0)
+            assert info(self.fd) == (7, STRIDE, 4096, 0, 0, 0)
             fcntl.ioctl(self.fd, CONFIG_CMD, CONFIG.pack(ntx, nrx, 0, 0))
             for q, count in enumerate((ntx, nrx)):
                 for i in range(count):

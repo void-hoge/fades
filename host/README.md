@@ -45,11 +45,11 @@
 - HW versionは `0x46414404`。旧HWとは入力セルの位置が異なる。
 - ドライバーとABIは `driver/src/fades.c` / `driver/include/fades_ioctl.h` に残している。
 
-## 現行C I/F：ABI v6
+## 現行C I/F：ABI v7
 
 `driver/include/fades_ioctl.h` をincludeし、`/dev/fades` のioctl / mmap / pollを使う。
 上記のRAIIや `try_dequeue()` は高水準ライブラリーの要求であり、現在のC ABIでは
-明示的に `QBUF` / `DQBUF` を行う。統計は引き続き `counters[44]`。
+明示的に `QBUF` / `DQBUF` を行う。統計は `fades_solver_stats` の名前付きフィールドで取得する。
 
 ### 設定と個別mmap
 
@@ -84,18 +84,23 @@ void *tx3 = mmap(NULL, b.map_bytes, PROT_READ | PROT_WRITE,
 open → CONFIG → 各面のQUERYBUF / mmap
      → 空のRX面をQBUF → TX面に書き込んでQBUF → STREAMON
      → poll / DQBUF / QBUF
-     → 最終TX投入後にEND_INPUT → 投入件数分を回収
+     → 最終TX投入後はRXのみpoll → 投入件数分を回収
      → STREAMOFF → munmap / close
 ```
 
 - TXの `QBUF` は `records=1..16384`、RXは `records=0`。
+- 設定直後は全TX/RX面がCPU所有。空のRXと入力を書き込んだTXをそれぞれ投入する。
 - `QBUF` 後はDMA側所有。`DQBUF` で回収するまでその面にアクセスしない。
 - TXの完了は転送元として再利用可能という意味で、求解完了ではない。
 - RXの `DQBUF` は実際の出力件数を返す。内容を読む必要はなく、件数だけ数えて返却できる。
 - `DQBUF` は常にノンブロッキングで、完了なしは `EAGAIN`。
   `poll` の `POLLOUT` は完了TX、`POLLIN` は完了RXの回収可能を表す。
   初期CPU所有のTX面があること自体は `POLLOUT` の条件ではない。
-- `END_INPUT` は追加TXを禁止する。完了待ちではなく、端数RXの返却にも必須ではない。
+- 待機対象は `poll` のeventsで指定する。TXのみは `POLLOUT`、RXのみは `POLLIN`、
+  両方は `POLLOUT | POLLIN`。pollは完了を消費せず、回収するまで即座に戻る。
+- 入力終了通知は不要。RXは満杯または登録済み全問題の完了で端数を含めて返る。
+  最終投入後はRXのみを待ち、回収件数が投入件数に達したら終了する。idle後の再投入も可能。
+- v7では `END_INPUT` を削除した。旧ioctl番号6は欠番で、呼び出すと `ENOTTY`。
 - `STREAMOFF` は転送をリセットし、全面をCPU所有に戻す。設定とマッピングは維持する。
 - 同時openは1つ。VMAはファイルを保持するため、fdをcloseしてもmmapが残る間は
   メモリーと排他所有が維持される。終了時は明示的に停止し、全VMAとfdを解放する。
@@ -117,16 +122,13 @@ DMAリングは方向ごとに32枠固定、バッファ数とは独立。1枠�
 ### C使用例と実機試験
 
 `host/tools/fades_run.c` をkv260-psの通常buildで `build/kv260-ps/host/tools/fades_run` に生成する。
-入力・出力は上記の64-byteレコードを連結したバイナリーファイル。
+入力は上記の64-byteレコードを連結したバイナリーファイル。
+指定時間だけ連続投入し、結果は内容を読まず件数のみ集計する。
 
 ```sh
-# 有限処理：全入力を事前投入し、全結果の回収後に初めて出力内容を読む。
-# TX/RXの両方に全件を保持できる容量が必要。
-build/kv260-ps/host/tools/fades_run input.raw output.raw 8 64
-
 # 連続投入：入力集合を反復コピーし、一意IDを付与。出力内容は読まず件数だけ数える。
-# 初回コピー、投入・回収、RX返却、DMA/求解、最終排出を計測に含む。
-build/kv260-ps/host/tools/fades_run input.raw - 8 64 10
+# 開始後の入力コピー、投入・回収、RX返却、DMA/求解、最終排出を計測に含む。
+build/kv260-ps/host/tools/fades_run input.raw 8 64 10
 
 python3 host/tests/check_abi.py
 python3 host/tests/check_stream.py --tx 1 --rx 1
@@ -136,6 +138,6 @@ python3 host/tests/check_example.py build/kv260-ps/host/tools/fades_run \
     --corpus sim/data/17puz49158.txt --seconds 5 --repeat 3
 ```
 
-連続投入の計測はセットアップ・ファイル読み込み・出力内容の検証を含まない。
-有限処理の表示時間も入力コピーから最終回収までで、ファイルへの出力は計測外。
-旧ABIとは `DMA_INFO` / mmap方法が異なるため、アプリも新ヘッダーでビルドする。
+連続投入の計測はセットアップ・ファイル読み込み・初回の入力コピーと投入・出力内容の検証を含まない。
+アプリも新ヘッダーでビルドする。v6からは `END_INPUT` の削除とABI番号のみが変更され、
+構造体・他のioctl番号・mmap方法は同じ。

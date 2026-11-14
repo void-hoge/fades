@@ -7,7 +7,7 @@ import select
 import struct
 import time
 
-from fades_device import Device, END, RECORDS, STRIDE, expect_errno
+from fades_device import BASE, Device, RECORDS, STRIDE, expect_errno
 
 DIGITS = "534678912672195348198342567859761423426853791713924856961537284287419635345286179"
 CELLS = sum(int(d) << (4 * i) for i, d in enumerate(DIGITS))
@@ -65,12 +65,15 @@ def accumulate(path, ntx, nrx):
             d.maps[1][i][:] = b"\xa5" * STRIDE
             d.queue(1, i)
         d.start()
-        fcntl.ioctl(d.fd, END)
         deadline = time.monotonic() + 10
         while d.stats()[1] != total:
             assert time.monotonic() < deadline, "No-dequeue accumulation stalled"
             time.sleep(0.001)
         totals(d, total)
+        # Waiting observes completions without consuming either queue.
+        for events in (select.POLLOUT, select.POLLIN, select.POLLOUT | select.POLLIN):
+            d.wait(events)
+            d.wait(events)
         seen = bytearray(total)
         received = 0
         outputs = []
@@ -83,6 +86,10 @@ def accumulate(path, ntx, nrx):
                 outputs.append(n)
         assert received == total and all(seen)
         assert outputs == lengths, outputs
+        # Uncollected TX completions must not make an RX-only poll ready.
+        d.poll.modify(d.fd, select.POLLIN)
+        assert not d.poll.poll(20), "RX-only poll reported TX completions"
+        d.wait(select.POLLOUT)
         assert sum(1 for _ in iter(lambda: d.dequeue(0), None)) == used
         print(f"PASS: TX/RX={ntx}/{nrx}, {total} IDs accumulated without any RX dequeue/read")
     finally:
@@ -92,10 +99,10 @@ def accumulate(path, ntx, nrx):
 def stream(path, ntx, nrx):
     d = Device(path, ntx, nrx)
     try:
+        assert not d.poll.poll(0), "CPU-owned initial buffers reported as completed"
         d.start()
         expect_errno(errno.EBUSY, d.start)
-        fcntl.ioctl(d.fd, END)
-        expect_errno(errno.EPIPE, lambda: d.queue(0, 0, 1))
+        expect_errno(errno.ENOTTY, lambda: fcntl.ioctl(d.fd, BASE | 6))
         d.stop()
         # TX must wait for receive capacity. Stop cancels queued work.
         d.queue(0, 0, 1)
@@ -143,16 +150,13 @@ def stream(path, ntx, nrx):
         total = sum(lengths)
         seen = bytearray(total)
         submitted = received = next_packet = 0
-        sealed = False
+        input_done = False
         held = []
         released = False
 
         def submit(i):
-            nonlocal submitted, next_packet, sealed
+            nonlocal submitted, next_packet, input_done
             if next_packet == len(lengths):
-                if not sealed:
-                    fcntl.ioctl(d.fd, END)
-                    sealed = True
                 return
             n = lengths[next_packet]
             fill(d.maps[0][i], submitted, n)
@@ -160,6 +164,7 @@ def stream(path, ntx, nrx):
             expect_errno(errno.EBUSY, lambda: d.queue(0, i, n))
             submitted += n
             next_packet += 1
+            input_done = next_packet == len(lengths)
 
         for i in range(nrx):
             d.maps[1][i][:] = b"\xa5" * STRIDE
@@ -168,7 +173,7 @@ def stream(path, ntx, nrx):
             submit(i)
         d.start()
         while received != total:
-            d.wait(select.POLLIN | (0 if sealed else select.POLLOUT))
+            d.wait(select.POLLIN | (0 if input_done else select.POLLOUT))
             while (done := d.dequeue(1)) is not None:
                 i, n = done
                 assert 0 < n <= RECORDS
@@ -192,10 +197,10 @@ def stream(path, ntx, nrx):
                 else:
                     d.maps[1][i][:] = b"\xa5" * STRIDE
                     d.queue(1, i)
-            if not sealed:
+            if not input_done:
                 while (done := d.dequeue(0)) is not None:
                     submit(done[0])
-                    if sealed:
+                    if input_done:
                         break
         assert released and all(seen)
         totals(d, total)
